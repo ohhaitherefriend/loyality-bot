@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: loyalty-bot-db
+    environment:
+      POSTGRES_DB: loyalty_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - loyalty-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    # Используем образ из Docker Hub (замените YOUR_USERNAME)
+    image: ${DOCKER_USERNAME}/loyalty-bot:latest
+    container_name: loyalty-bot-app
+    environment:
+      # Spring профиль
+      SPRING_PROFILES_ACTIVE: prod
+      
+      # База данных PostgreSQL
+      DATABASE_URL: jdbc:postgresql://postgres:5432/loyalty_db
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: ${DB_PASSWORD:-password}
+      
+      # Telegram Bot
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      
+      # Admin
+      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:-plstkwrld}
+      
+      # Опционально: порт
+      PORT: ${PORT:-8080}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - loyalty-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  loyalty-network:
+    driver: bridge
+
+

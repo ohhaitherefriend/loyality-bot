@@ -1,0 +1,588 @@
+package com.plstk.loyaltybot.bot;
+
+import com.plstk.loyaltybot.entity.DiscountCode;
+import com.plstk.loyaltybot.entity.PurchaseCode;
+import com.plstk.loyaltybot.entity.SpendCode;
+import com.plstk.loyaltybot.entity.Transaction;
+import com.plstk.loyaltybot.entity.User;
+import com.plstk.loyaltybot.service.DiscountCodeService;
+import com.plstk.loyaltybot.service.PurchaseCodeService;
+import com.plstk.loyaltybot.service.SpendCodeService;
+import com.plstk.loyaltybot.service.TransactionService;
+import com.plstk.loyaltybot.service.UserService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
+import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
+import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
+
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+@Component
+@Slf4j
+public class LoyaltyBot extends TelegramLongPollingBot {
+    
+    private final UserService userService;
+    private final PurchaseCodeService purchaseCodeService;
+    private final SpendCodeService spendCodeService;
+    private final DiscountCodeService discountCodeService;
+    private final TransactionService transactionService;
+    
+    @Value("${telegram.bot.username}")
+    private String botUsername;
+    
+    @Value("${telegram.bot.admin-secret:}")
+    private String adminSecret;
+    
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
+    
+    // Кнопки для пользователя
+    private static final String BTN_PURCHASE = "🛍 Я совершаю покупку";
+    private static final String BTN_SPEND = "💳 Потратить баллы";
+    private static final String BTN_MY_POINTS = "💰 Мои баллы";
+    private static final String BTN_HISTORY = "📜 История операций";
+    private static final String BTN_DISCOUNTS = "🎁 Мои скидки";
+    
+    // Кнопки для админа
+    private static final String BTN_ENTER_CODE = "🔑 Ввести код покупки";
+    private static final String BTN_SEND_DISCOUNT = "📢 Отправить скидку";
+    private static final String BTN_STATS = "📊 Статистика";
+    
+    public LoyaltyBot(@Value("${telegram.bot.token}") String botToken,
+                     UserService userService,
+                     PurchaseCodeService purchaseCodeService,
+                     SpendCodeService spendCodeService,
+                     DiscountCodeService discountCodeService,
+                     TransactionService transactionService) {
+        super(botToken);
+        this.userService = userService;
+        this.purchaseCodeService = purchaseCodeService;
+        this.spendCodeService = spendCodeService;
+        this.discountCodeService = discountCodeService;
+        this.transactionService = transactionService;
+    }
+    
+    @Override
+    public String getBotUsername() {
+        return botUsername;
+    }
+    
+    @Override
+    public void onUpdateReceived(Update update) {
+        try {
+            if (update.hasMessage()) {
+                handleMessage(update);
+            }
+        } catch (Exception e) {
+            log.error("Error processing update", e);
+        }
+    }
+    
+    private void handleMessage(Update update) {
+        Long chatId = update.getMessage().getChatId();
+        String messageText = update.getMessage().getText();
+        
+        Optional<User> userOpt = userService.findByChatId(chatId);
+        
+        // Команда /start
+        if (messageText != null && messageText.equals("/start")) {
+            handleStartCommand(chatId, update, userOpt);
+            return;
+        }
+        
+        // Команда /makeadmin для назначения администратора
+        if (messageText != null && messageText.startsWith("/makeadmin")) {
+            handleMakeAdminCommand(chatId, messageText, userOpt);
+            return;
+        }
+        
+        if (userOpt.isEmpty()) {
+            sendMessage(chatId, "Пожалуйста, начните с команды /start");
+            return;
+        }
+        
+        User user = userOpt.get();
+        
+        // Обработка состояний пользователя
+        if (user.getState() == User.UserState.AWAITING_PHONE) {
+            handlePhoneNumber(chatId, update, user);
+            return;
+        }
+        
+        if (user.getState() == User.UserState.AWAITING_ADMIN_CODE) {
+            handleAdminCodeInput(chatId, messageText, user);
+            return;
+        }
+        
+        if (user.getState() == User.UserState.AWAITING_SPEND_AMOUNT) {
+            handleSpendAmountInput(chatId, messageText, user);
+            return;
+        }
+        
+        // Обработка кнопок
+        if (messageText != null) {
+            switch (messageText) {
+                case BTN_PURCHASE -> handlePurchaseButton(chatId, user);
+                case BTN_SPEND -> handleSpendButton(chatId, user);
+                case BTN_MY_POINTS -> handleMyPointsButton(chatId, user);
+                case BTN_HISTORY -> handleHistoryButton(chatId, user);
+                case BTN_DISCOUNTS -> handleDiscountsButton(chatId, user);
+                case BTN_ENTER_CODE -> handleEnterCodeButton(chatId, user);
+                case BTN_SEND_DISCOUNT -> handleSendDiscountButton(chatId, user);
+                case BTN_STATS -> handleStatsButton(chatId, user);
+                default -> sendMessage(chatId, "Неизвестная команда. Используйте кнопки меню.");
+            }
+        }
+    }
+    
+    private void handleStartCommand(Long chatId, Update update, Optional<User> userOpt) {
+        if (userOpt.isPresent()) {
+            User user = userOpt.get();
+            sendMessage(chatId, "С возвращением, " + user.getFirstName() + "!", getUserKeyboard(user));
+        } else {
+            sendMessage(chatId, 
+                "👋 Добро пожаловать в программу лояльности!\n\n" +
+                "Для регистрации, пожалуйста, поделитесь своим номером телефона, " +
+                "нажав на кнопку ниже.", 
+                getPhoneRequestKeyboard());
+            
+            User newUser = User.builder()
+                    .chatId(chatId)
+                    .phoneNumber("")
+                    .firstName(update.getMessage().getFrom().getFirstName())
+                    .lastName(update.getMessage().getFrom().getLastName())
+                    .username(update.getMessage().getFrom().getUserName())
+                    .points(0)
+                    .role(User.UserRole.USER)
+                    .loyaltyLevel(User.LoyaltyLevel.BRONZE)
+                    .state(User.UserState.AWAITING_PHONE)
+                    .build();
+            userService.updateUserState(newUser, User.UserState.AWAITING_PHONE);
+        }
+    }
+    
+    private void handlePhoneNumber(Long chatId, Update update, User user) {
+        String phoneNumber = null;
+        
+        if (update.getMessage().hasContact()) {
+            phoneNumber = update.getMessage().getContact().getPhoneNumber();
+        } else if (update.getMessage().hasText()) {
+            phoneNumber = update.getMessage().getText();
+        }
+        
+        if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
+            sendMessage(chatId, "Пожалуйста, отправьте номер телефона.");
+            return;
+        }
+        
+        // Нормализация номера телефона
+        phoneNumber = phoneNumber.replaceAll("[^0-9+]", "");
+        
+        // Проверка, не занят ли номер
+        Optional<User> existingUser = userService.findByPhoneNumber(phoneNumber);
+        if (existingUser.isPresent()) {
+            sendMessage(chatId, "❌ Этот номер телефона уже зарегистрирован!");
+            return;
+        }
+        
+        user.setPhoneNumber(phoneNumber);
+        user.setState(User.UserState.REGISTERED);
+        userService.updateUserState(user, User.UserState.REGISTERED);
+        
+        sendMessage(chatId, 
+            "✅ Регистрация успешна!\n\n" +
+            "📱 Телефон: " + phoneNumber + "\n" +
+            "💰 Баллы: 0\n" +
+            "🏆 Уровень: " + User.LoyaltyLevel.BRONZE.getDisplayName() + "\n\n" +
+            "Используйте кнопки меню для навигации.",
+            getUserKeyboard(user));
+    }
+    
+    private void handlePurchaseButton(Long chatId, User user) {
+        PurchaseCode code = purchaseCodeService.generateCode(user);
+        
+        sendMessage(chatId,
+            "🛍 Код для покупки создан!\n\n" +
+            "📋 Ваш код: *" + code.getCode() + "*\n\n" +
+            "⏰ Код действителен до: " + code.getExpiresAt().format(DATE_FORMATTER) + "\n\n" +
+            "Назовите этот код администратору в магазине для начисления баллов.",
+            getUserKeyboard(user), true);
+    }
+    
+    private void handleSpendButton(Long chatId, User user) {
+        if (user.getPoints() == 0) {
+            sendMessage(chatId, 
+                "❌ У вас пока нет баллов для списания.\n\n" +
+                "💡 Совершайте покупки и накапливайте баллы!",
+                getUserKeyboard(user));
+            return;
+        }
+        
+        userService.updateUserState(user, User.UserState.AWAITING_SPEND_AMOUNT);
+        sendMessage(chatId,
+            "💳 Списание баллов\n\n" +
+            "💰 Ваш баланс: *" + user.getPoints() + "* баллов\n\n" +
+            "Введите количество баллов, которое хотите потратить:",
+            null, true);
+    }
+    
+    private void handleSpendAmountInput(Long chatId, String messageText, User user) {
+        try {
+            int amount = Integer.parseInt(messageText.trim());
+            
+            if (amount <= 0) {
+                sendMessage(chatId, "❌ Количество баллов должно быть больше 0");
+                return;
+            }
+            
+            if (amount > user.getPoints()) {
+                sendMessage(chatId, 
+                    "❌ Недостаточно баллов!\n\n" +
+                    "💰 Ваш баланс: " + user.getPoints() + " баллов\n" +
+                    "❌ Вы пытаетесь списать: " + amount + " баллов\n\n" +
+                    "Введите корректное количество баллов:",
+                    null, false);
+                return;
+            }
+            
+            // Генерируем код списания
+            SpendCode spendCode = spendCodeService.generateCode(user, amount);
+            
+            // Возвращаем пользователя в обычное состояние
+            userService.updateUserState(user, User.UserState.REGISTERED);
+            
+            sendMessage(chatId,
+                "💳 Код списания создан!\n\n" +
+                "📋 Ваш код: *" + spendCode.getCode() + "*\n" +
+                "💰 Сумма к списанию: *" + amount + "* баллов\n\n" +
+                "⏰ Код действителен до: " + spendCode.getExpiresAt().format(DATE_FORMATTER) + "\n\n" +
+                "Назовите этот код администратору для списания баллов.",
+                getUserKeyboard(user), true);
+                
+        } catch (NumberFormatException e) {
+            sendMessage(chatId, "❌ Пожалуйста, введите число (количество баллов)");
+        }
+    }
+    
+    private void handleMyPointsButton(Long chatId, User user) {
+        String emoji = switch (user.getLoyaltyLevel()) {
+            case BRONZE -> "🥉";
+            case SILVER -> "🥈";
+            case GOLD -> "🥇";
+        };
+        
+        sendMessage(chatId,
+            "💰 *Ваш баланс баллов*\n\n" +
+            emoji + " Уровень: " + user.getLoyaltyLevel().getDisplayName() + "\n" +
+            "💎 Баллы: *" + user.getPoints() + "*\n\n" +
+            getNextLevelInfo(user),
+            getUserKeyboard(user), true);
+    }
+    
+    private String getNextLevelInfo(User user) {
+        return switch (user.getLoyaltyLevel()) {
+            case BRONZE -> "До серебряного уровня: " + 
+                (User.LoyaltyLevel.SILVER.getThreshold() - user.getPoints()) + " баллов";
+            case SILVER -> "До золотого уровня: " + 
+                (User.LoyaltyLevel.GOLD.getThreshold() - user.getPoints()) + " баллов";
+            case GOLD -> "Вы на максимальном уровне! 🎉";
+        };
+    }
+    
+    private void handleHistoryButton(Long chatId, User user) {
+        List<Transaction> transactions = transactionService.getUserRecentTransactions(user, 10);
+        
+        if (transactions.isEmpty()) {
+            sendMessage(chatId, "📜 История операций пуста", getUserKeyboard(user));
+            return;
+        }
+        
+        StringBuilder message = new StringBuilder("📜 *Последние операции:*\n\n");
+        
+        for (Transaction tx : transactions) {
+            String sign = tx.getType() == Transaction.TransactionType.EARN ? "+" : "-";
+            message.append(tx.getCreatedAt().format(DATE_FORMATTER))
+                   .append("\n")
+                   .append(tx.getType().getDisplayName())
+                   .append(": ")
+                   .append(sign)
+                   .append(tx.getPoints())
+                   .append(" баллов\n");
+            
+            if (tx.getDescription() != null) {
+                message.append("_").append(tx.getDescription()).append("_\n");
+            }
+            message.append("\n");
+        }
+        
+        sendMessage(chatId, message.toString(), getUserKeyboard(user), true);
+    }
+    
+    private void handleDiscountsButton(Long chatId, User user) {
+        List<DiscountCode> codes = discountCodeService.getActiveCodesForUser(user);
+        
+        if (codes.isEmpty()) {
+            sendMessage(chatId, "🎁 У вас пока нет активных скидок", getUserKeyboard(user));
+            return;
+        }
+        
+        StringBuilder message = new StringBuilder("🎁 *Ваши активные скидки:*\n\n");
+        
+        for (DiscountCode code : codes) {
+            message.append("🏷 Код: *").append(code.getCode()).append("*\n");
+            if (code.getDiscountPercent() != null) {
+                message.append("💵 Скидка: ").append(code.getDiscountPercent()).append("%\n");
+            }
+            if (code.getDescription() != null) {
+                message.append("📝 ").append(code.getDescription()).append("\n");
+            }
+            if (code.getExpiresAt() != null) {
+                message.append("⏰ Действует до: ")
+                       .append(code.getExpiresAt().format(DATE_FORMATTER))
+                       .append("\n");
+            }
+            message.append("\n");
+        }
+        
+        sendMessage(chatId, message.toString(), getUserKeyboard(user), true);
+    }
+    
+    // Админ функции
+    private void handleEnterCodeButton(Long chatId, User user) {
+        if (user.getRole() != User.UserRole.ADMIN) {
+            sendMessage(chatId, "❌ Эта функция доступна только администраторам");
+            return;
+        }
+        
+        userService.updateUserState(user, User.UserState.AWAITING_ADMIN_CODE);
+        sendMessage(chatId, "🔑 Введите код от клиента:\n\n" +
+            "💡 Это может быть:\n" +
+            "• Код покупки (начисление баллов)\n" +
+            "• Код списания (списание баллов)");
+    }
+    
+    private void handleAdminCodeInput(Long chatId, String code, User admin) {
+        if (admin.getRole() != User.UserRole.ADMIN) {
+            return;
+        }
+        
+        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim());
+        
+        if (purchaseCodeOpt.isEmpty()) {
+            sendMessage(chatId, "❌ Код не найден. Проверьте правильность ввода.");
+            userService.updateUserState(admin, User.UserState.REGISTERED);
+            return;
+        }
+        
+        PurchaseCode purchaseCode = purchaseCodeOpt.get();
+        
+        try {
+            purchaseCodeService.useCode(purchaseCode, admin);
+            
+            // Начисляем баллы (например, 10 баллов за покупку)
+            int pointsToAdd = 10; // TODO: сделать настраиваемым
+            User customer = purchaseCode.getUser();
+            userService.addPoints(customer, pointsToAdd);
+            
+            // Создаем транзакцию
+            transactionService.createTransaction(
+                customer,
+                pointsToAdd,
+                Transaction.TransactionType.EARN,
+                "Покупка в магазине",
+                purchaseCode,
+                admin
+            );
+            
+            sendMessage(chatId, 
+                "✅ Код успешно активирован!\n\n" +
+                "👤 Клиент: " + customer.getFirstName() + "\n" +
+                "💰 Начислено: " + pointsToAdd + " баллов\n" +
+                "📊 Всего у клиента: " + customer.getPoints() + " баллов",
+                getUserKeyboard(admin));
+            
+            // Уведомляем клиента
+            sendMessage(customer.getChatId(),
+                "✅ Вам начислено " + pointsToAdd + " баллов!\n\n" +
+                "💰 Ваш баланс: " + customer.getPoints() + " баллов\n" +
+                "🏆 Уровень: " + customer.getLoyaltyLevel().getDisplayName());
+            
+        } catch (IllegalStateException e) {
+            sendMessage(chatId, "❌ " + e.getMessage(), getUserKeyboard(admin));
+        }
+        
+        userService.updateUserState(admin, User.UserState.REGISTERED);
+    }
+    
+    private void handleSendDiscountButton(Long chatId, User user) {
+        if (user.getRole() != User.UserRole.ADMIN) {
+            sendMessage(chatId, "❌ Эта функция доступна только администраторам");
+            return;
+        }
+        
+        sendMessage(chatId, "📢 Функция массовой рассылки скидок будет доступна в следующей версии!");
+        // TODO: Implement discount sending
+    }
+    
+    private void handleStatsButton(Long chatId, User user) {
+        if (user.getRole() != User.UserRole.ADMIN) {
+            sendMessage(chatId, "❌ Эта функция доступна только администраторам");
+            return;
+        }
+        
+        sendMessage(chatId, "📊 Статистика будет доступна в следующей версии!");
+        // TODO: Implement statistics
+    }
+    
+    private void handleMakeAdminCommand(Long chatId, String messageText, Optional<User> userOpt) {
+        if (userOpt.isEmpty()) {
+            sendMessage(chatId, "⚠️ Сначала зарегистрируйтесь в боте командой /start");
+            return;
+        }
+        
+        User user = userOpt.get();
+        
+        // Проверка, не является ли уже администратором
+        if (user.getRole() == User.UserRole.ADMIN) {
+            sendMessage(chatId, "✅ Вы уже являетесь администратором!");
+            return;
+        }
+        
+        // Проверка наличия секретного кода в настройках
+        if (adminSecret == null || adminSecret.isEmpty()) {
+            sendMessage(chatId, 
+                "❌ Секретный код не настроен.\n\n" +
+                "Для назначения администратора обратитесь к владельцу системы или " +
+                "используйте SQL запрос через H2 Console.\n\n" +
+                "Подробнее: см. файл ADMIN_SETUP.md");
+            return;
+        }
+        
+        // Извлечение кода из команды
+        String[] parts = messageText.trim().split("\\s+", 2);
+        if (parts.length < 2) {
+            sendMessage(chatId, 
+                "❌ Неверный формат команды.\n\n" +
+                "Используйте: /makeadmin СЕКРЕТНЫЙ_КОД");
+            return;
+        }
+        
+        String providedCode = parts[1];
+        
+        // Проверка секретного кода
+        if (!adminSecret.equals(providedCode)) {
+            log.warn("Failed admin promotion attempt for chatId={}, provided code={}", 
+                chatId, providedCode);
+            sendMessage(chatId, "❌ Неверный секретный код!");
+            return;
+        }
+        
+        // Назначение роли администратора
+        try {
+            User updatedUser = userService.setUserRole(user, User.UserRole.ADMIN);
+            log.info("User chatId={} phone={} promoted to ADMIN", 
+                updatedUser.getChatId(), updatedUser.getPhoneNumber());
+            
+            sendMessage(chatId, 
+                "✅ Поздравляем! Вы назначены администратором!\n\n" +
+                "🎉 Теперь у вас есть доступ к административным функциям.\n\n" +
+                "Отправьте /start чтобы увидеть новое меню.",
+                getUserKeyboard(updatedUser));
+        } catch (Exception e) {
+            log.error("Error promoting user to admin: chatId={}", chatId, e);
+            sendMessage(chatId, "❌ Ошибка при назначении администратора. Попробуйте позже.");
+        }
+    }
+    
+    // Вспомогательные методы для клавиатуры
+    private ReplyKeyboardMarkup getUserKeyboard(User user) {
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        
+        List<KeyboardRow> rows = new ArrayList<>();
+        
+        if (user.getRole() == User.UserRole.ADMIN) {
+            // Админская клавиатура
+            KeyboardRow row1 = new KeyboardRow();
+            row1.add(new KeyboardButton(BTN_ENTER_CODE));
+            row1.add(new KeyboardButton(BTN_MY_POINTS));
+            
+            KeyboardRow row2 = new KeyboardRow();
+            row2.add(new KeyboardButton(BTN_SEND_DISCOUNT));
+            row2.add(new KeyboardButton(BTN_STATS));
+            
+            rows.add(row1);
+            rows.add(row2);
+        } else {
+            // Клавиатура обычного пользователя
+            KeyboardRow row1 = new KeyboardRow();
+            row1.add(new KeyboardButton(BTN_PURCHASE));
+            row1.add(new KeyboardButton(BTN_MY_POINTS));
+            
+            KeyboardRow row2 = new KeyboardRow();
+            row2.add(new KeyboardButton(BTN_HISTORY));
+            row2.add(new KeyboardButton(BTN_DISCOUNTS));
+            
+            rows.add(row1);
+            rows.add(row2);
+        }
+        
+        keyboard.setKeyboard(rows);
+        return keyboard;
+    }
+    
+    private ReplyKeyboardMarkup getPhoneRequestKeyboard() {
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        keyboard.setResizeKeyboard(true);
+        keyboard.setOneTimeKeyboard(true);
+        
+        List<KeyboardRow> rows = new ArrayList<>();
+        KeyboardRow row = new KeyboardRow();
+        
+        KeyboardButton button = new KeyboardButton("📱 Отправить номер телефона");
+        button.setRequestContact(true);
+        row.add(button);
+        
+        rows.add(row);
+        keyboard.setKeyboard(rows);
+        
+        return keyboard;
+    }
+    
+    private void sendMessage(Long chatId, String text) {
+        sendMessage(chatId, text, null, false);
+    }
+    
+    private void sendMessage(Long chatId, String text, ReplyKeyboardMarkup keyboard) {
+        sendMessage(chatId, text, keyboard, false);
+    }
+    
+    private void sendMessage(Long chatId, String text, ReplyKeyboardMarkup keyboard, boolean markdown) {
+        SendMessage message = new SendMessage();
+        message.setChatId(chatId.toString());
+        message.setText(text);
+        
+        if (markdown) {
+            message.setParseMode("Markdown");
+        }
+        
+        if (keyboard != null) {
+            message.setReplyMarkup(keyboard);
+        }
+        
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error("Error sending message to chat {}", chatId, e);
+        }
+    }
+}

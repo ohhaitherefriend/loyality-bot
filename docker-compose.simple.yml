@@ -1,0 +1,36 @@
+version: '3.8'
+
+# Простой вариант: только бот с H2 базой данных (без PostgreSQL)
+services:
+  app:
+    # Используем образ из Docker Hub (замените YOUR_USERNAME)
+    image: ${DOCKER_USERNAME}/loyalty-bot:latest
+    container_name: loyalty-bot-app
+    environment:
+      # Используем профиль по умолчанию (H2 база в файле)
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-default}
+      
+      # Telegram Bot
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
+      
+      # Admin
+      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:-plstkwrld}
+    ports:
+      - "8080:8080"
+    volumes:
+      # Сохраняем H2 базу данных между перезапусками
+      - bot_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  bot_data:
+    driver: local
+
+
