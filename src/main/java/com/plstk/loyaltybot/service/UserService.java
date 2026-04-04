@@ -18,9 +18,16 @@ public class UserService {
     
     private final UserRepository userRepository;
     private final TransactionService transactionService;
+    private final ShopSettingsService shopSettingsService;
+    
+    // ========== Single-tenant методы (для обратной совместимости) ==========
     
     public Optional<User> findByChatId(Long chatId) {
         return userRepository.findByChatId(chatId);
+    }
+    
+    public Optional<User> findById(Long id) {
+        return userRepository.findById(id);
     }
     
     public Optional<User> findByPhoneNumber(String phoneNumber) {
@@ -36,6 +43,50 @@ public class UserService {
     
     public List<User> findAllByPhoneNumber(String phoneNumber) {
         return userRepository.findAllByPhoneNumber(phoneNumber);
+    }
+    
+    // ========== Multi-tenant методы ==========
+    
+    /**
+     * Найти пользователя по chatId и shopId (multi-tenant)
+     */
+    public Optional<User> findByChatIdAndShopId(Long chatId, String shopId) {
+        if (shopId == null) {
+            return findByChatId(chatId); // Fallback to single-tenant
+        }
+        return userRepository.findByChatIdAndShopId(chatId, shopId);
+    }
+    
+    /**
+     * Найти пользователя по телефону и shopId (multi-tenant)
+     */
+    public Optional<User> findByPhoneNumberAndShopId(String phoneNumber, String shopId) {
+        if (shopId == null) {
+            return findByPhoneNumber(phoneNumber);
+        }
+        return userRepository.findByPhoneNumberAndShopId(phoneNumber, shopId);
+    }
+    
+    /**
+     * Получить всех пользователей магазина
+     */
+    public List<User> findByShopId(String shopId) {
+        return userRepository.findByShopId(shopId);
+    }
+    
+    /**
+     * Получить зарегистрированных пользователей магазина
+     */
+    public List<User> findRegisteredByShopId(String shopId) {
+        return userRepository.findRegisteredByShopId(shopId);
+    }
+    
+    /**
+     * Сохранить пользователя
+     */
+    @Transactional
+    public User save(User user) {
+        return userRepository.save(user);
     }
     
     @Transactional
@@ -78,14 +129,19 @@ public class UserService {
      */
     @Transactional
     public User checkAndUpdateDiscount(User user) {
+        // Если накопительные скидки отключены - ничего не делаем
+        if (!shopSettingsService.isDiscountTiersEnabled()) {
+            return user;
+        }
+        
         // Получаем дату с которой считаем накопления
         LocalDateTime startDate = user.getAccumulationStartDate();
         
         // Считаем сумму покупок с этой даты
         double accumulated = transactionService.getAccumulatedAmountSince(user, startDate);
         
-        // Определяем уровень скидки на основе накопленной суммы
-        Integer newDiscountLevel = User.calculateDiscountLevel(accumulated);
+        // Определяем уровень скидки на основе накопленной суммы (из настроек)
+        Integer newDiscountLevel = shopSettingsService.calculateDiscountLevel(accumulated);
         
         boolean wasDiscountActive = user.isDiscountValid();
         Integer oldDiscountLevel = user.getDiscountLevel();
@@ -130,16 +186,41 @@ public class UserService {
      */
     @Transactional
     public double processPurchase(User user) {
-        // Получаем текущий процент скидки
-        double discountPercent = user.getDiscountPercent();
+        double discountPercent = user.getEffectiveDiscountPercent();
         
-        // Проверяем и обновляем скидку на основе транзакций
         checkAndUpdateDiscount(user);
+        checkAndUpdatePermanentDiscount(user);
         
         log.info("Processed purchase for user {}, applied discount: {}%", 
             user.getChatId(), discountPercent * 100);
         
         return discountPercent;
+    }
+    
+    /**
+     * Проверяет общую сумму покупок пользователя и обновляет постоянную скидку если нужно.
+     * Постоянная скидка никогда не сгорает и только растёт.
+     */
+    @Transactional
+    public User checkAndUpdatePermanentDiscount(User user) {
+        String shopId = user.getShopId();
+        
+        if (shopId == null || !shopSettingsService.isPermanentDiscountEnabled(shopId)) {
+            return user;
+        }
+        
+        double totalSpend = user.getTotalSpend() != null ? user.getTotalSpend() : 0.0;
+        Integer newLevel = shopSettingsService.calculatePermanentDiscountLevel(shopId, totalSpend);
+        Integer currentLevel = user.getPermanentDiscountPercent();
+        
+        if (newLevel != null && (currentLevel == null || newLevel > currentLevel)) {
+            user.setPermanentDiscountPercent(newLevel);
+            log.info("User {} earned permanent discount {}% (totalSpend={})", 
+                user.getChatId(), newLevel, totalSpend);
+            return userRepository.save(user);
+        }
+        
+        return user;
     }
     
     public List<User> findAllRegisteredUsers() {
@@ -148,6 +229,10 @@ public class UserService {
     
     public List<User> findAllAdmins() {
         return userRepository.findByRole(User.UserRole.ADMIN);
+    }
+    
+    public List<User> findByRole(User.UserRole role) {
+        return userRepository.findByRole(role);
     }
     
     /**

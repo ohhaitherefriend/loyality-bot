@@ -1,7 +1,7 @@
 # ========================================
 # Stage 1: Build
 # ========================================
-FROM maven:3.8.7-eclipse-temurin-17 AS build
+FROM maven:3.9-eclipse-temurin-21 AS build
 
 WORKDIR /build
 
@@ -21,7 +21,7 @@ RUN ls -lah /build/target/
 # ========================================
 # Stage 2: Runtime
 # ========================================
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:21-jre-jammy
 
 # Метаданные образа
 LABEL maintainer="your-email@example.com"

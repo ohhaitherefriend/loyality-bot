@@ -85,7 +85,7 @@ cat > .env << EOF
 DOCKER_USERNAME=${DOCKER_USERNAME}
 TELEGRAM_BOT_TOKEN=your_token_here
 TELEGRAM_BOT_USERNAME=your_bot_username
-ADMIN_SECRET_CODE=plstkwrld
+ADMIN_SECRET_CODE=your_secret_code_here
 EOF
 
 # 2. Запустить
@@ -104,8 +104,8 @@ cat > .env << EOF
 DOCKER_USERNAME=${DOCKER_USERNAME}
 TELEGRAM_BOT_TOKEN=your_token_here
 TELEGRAM_BOT_USERNAME=your_bot_username
-ADMIN_SECRET_CODE=plstkwrld
-DB_PASSWORD=secure_password_123
+ADMIN_SECRET_CODE=your_secret_code_here
+DB_PASSWORD=your_secure_db_password_here
 EOF
 
 # 2. Запустить

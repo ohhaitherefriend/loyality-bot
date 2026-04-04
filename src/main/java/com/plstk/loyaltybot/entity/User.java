@@ -9,7 +9,11 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "users")
+@Table(name = "users", indexes = {
+    @Index(name = "idx_user_chat_id_shop_id", columnList = "chatId, shopId", unique = true),
+    @Index(name = "idx_user_phone_shop_id", columnList = "phoneNumber, shopId"),
+    @Index(name = "idx_user_shop_id", columnList = "shopId")
+})
 @Data
 @Builder
 @NoArgsConstructor
@@ -20,10 +24,20 @@ public class User {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     
-    @Column(unique = true, nullable = false)
+    /**
+     * Telegram Chat ID
+     */
+    @Column(nullable = false)
     private Long chatId;
     
-    @Column(unique = true, nullable = false)
+    /**
+     * ID магазина (для multi-tenancy).
+     * Один пользователь может быть клиентом нескольких магазинов.
+     */
+    @Column(length = 36)
+    private String shopId;
+    
+    @Column(nullable = false)
     private String phoneNumber;
     
     private String firstName;
@@ -32,6 +46,71 @@ public class User {
     
     private LocalDateTime discountEarnedAt;  // Дата когда была активирована скидка (или последнего продления)
     private Integer discountLevel;  // Уровень скидки (5, 7 или 10 процентов)
+    
+    // ========== Customer Profile (новые поля) ==========
+    
+    /**
+     * Дата первой покупки
+     */
+    private LocalDateTime firstPurchaseAt;
+    
+    /**
+     * Дата последней покупки
+     */
+    private LocalDateTime lastPurchaseAt;
+    
+    /**
+     * Общее количество покупок
+     */
+    @Builder.Default
+    private Integer purchasesCount = 0;
+    
+    /**
+     * Количество визитов (для штампов/fast checkout)
+     */
+    @Builder.Default
+    private Integer visitsCount = 0;
+    
+    /**
+     * Общая сумма покупок за всё время
+     */
+    @Builder.Default
+    private Double totalSpend = 0.0;
+    
+    /**
+     * Статус клиента (NEW, REGULAR, VIP, LOST)
+     */
+    @Enumerated(EnumType.STRING)
+    @Builder.Default
+    private CustomerStatus customerStatus = CustomerStatus.NEW;
+    
+    /**
+     * Дата последнего обновления статуса
+     */
+    private LocalDateTime statusUpdatedAt;
+    
+    /**
+     * Дата последнего fast checkout (для cooldown)
+     */
+    private LocalDateTime lastFastCheckoutAt;
+    
+    /**
+     * Количество fast checkout за сегодня
+     */
+    @Builder.Default
+    private Integer fastCheckoutTodayCount = 0;
+    
+    /**
+     * Дата сброса счётчика fast checkout
+     */
+    private LocalDateTime fastCheckoutCountResetAt;
+    
+    /**
+     * Постоянная скидка (не сгорает). Кэшированное значение, обновляется при каждой покупке.
+     */
+    private Integer permanentDiscountPercent;
+    
+    // ========== Устаревшие поля ==========
     
     // Устаревшие поля (для обратной совместимости, будут удалены после миграции)
     @Deprecated
@@ -73,9 +152,12 @@ public class User {
         REGISTERED,
         AWAITING_ADMIN_CODE,
         AWAITING_PURCHASE_AMOUNT,  // Ожидание ввода суммы покупки
+        AWAITING_FAST_OR_AMOUNT_CHOICE,  // Ожидание выбора: быстро или с суммой
+        AWAITING_REDEEM_CODE,  // Ожидание ввода кода погашения награды (для админа)
         AWAITING_PROMOTION_DISCOUNT,  // Ожидание ввода процента скидки для акции
         AWAITING_PROMOTION_DURATION,  // Ожидание ввода срока действия акции
-        AWAITING_PROMOTION_DESCRIPTION  // Ожидание ввода описания акции
+        AWAITING_PROMOTION_DESCRIPTION,  // Ожидание ввода описания акции
+        AWAITING_CLIENT_NOTE  // Ожидание ввода заметки о клиенте (для персонала)
     }
     
     /**
@@ -92,6 +174,15 @@ public class User {
         }
         
         return discountLevel / 100.0;
+    }
+    
+    /**
+     * Возвращает наибольший процент скидки среди истекающей и постоянной.
+     */
+    public double getEffectiveDiscountPercent() {
+        double expiring = getDiscountPercent();
+        double permanent = permanentDiscountPercent != null ? permanentDiscountPercent / 100.0 : 0.0;
+        return Math.max(expiring, permanent);
     }
     
     /**
@@ -118,11 +209,15 @@ public class User {
     }
     
     /**
-     * Определяет уровень скидки на основе накопленной суммы
+     * @deprecated Используйте ShopSettingsService.calculateDiscountLevel() вместо этого метода.
+     * Пороги скидок теперь настраиваются в ShopSettings.
+     * 
+     * Определяет уровень скидки на основе накопленной суммы (fallback значения)
      * 10% - при 30,000 руб или больше
      * 7% - при 25,000 руб или больше
      * 5% - при 20,000 руб или больше
      */
+    @Deprecated
     public static Integer calculateDiscountLevel(double amount) {
         if (amount >= 30000) {
             return 10;
@@ -136,8 +231,11 @@ public class User {
     }
     
     /**
-     * Возвращает минимальную сумму для текущего уровня скидки
+     * @deprecated Используйте ShopSettingsService.getRequiredAmountForDiscount() вместо этого метода.
+     * 
+     * Возвращает минимальную сумму для текущего уровня скидки (fallback значения)
      */
+    @Deprecated
     public Double getRequiredAmountForCurrentDiscount() {
         if (discountLevel == null) {
             return 20000.0;
@@ -185,9 +283,12 @@ public class User {
     }
     
     /**
-     * Возвращает информацию о прогрессе накопления или продления скидки
+     * @deprecated Используйте ShopSettingsService.getDiscountProgressInfo() вместо этого метода.
+     * 
+     * Возвращает информацию о прогрессе накопления или продления скидки (fallback)
      * ВАЖНО: Требует передачи накопленной суммы из транзакций
      */
+    @Deprecated
     public String getNextDiscountLevelInfo(double accumulatedFromTransactions) {
         // Если скидка действительна, показываем прогресс для продления
         if (isDiscountValid()) {
@@ -215,5 +316,103 @@ public class User {
         } else {
             return String.format("До скидки 5%%: %.2f руб.", 20000 - accumulatedFromTransactions);
         }
+    }
+    
+    // ========== Customer Profile методы ==========
+    
+    /**
+     * Возвращает средний чек клиента
+     */
+    public Double getAverageCheck() {
+        if (purchasesCount == null || purchasesCount == 0 || totalSpend == null) {
+            return 0.0;
+        }
+        return totalSpend / purchasesCount;
+    }
+    
+    /**
+     * Возвращает количество дней с последней покупки
+     */
+    public Long getDaysSinceLastPurchase() {
+        if (lastPurchaseAt == null) {
+            return null;
+        }
+        return java.time.Duration.between(lastPurchaseAt, LocalDateTime.now()).toDays();
+    }
+    
+    /**
+     * Проверяет, можно ли выполнить fast checkout (cooldown не истёк)
+     */
+    public boolean canFastCheckout(int cooldownMinutes) {
+        if (lastFastCheckoutAt == null) {
+            return true;
+        }
+        return LocalDateTime.now().isAfter(lastFastCheckoutAt.plusMinutes(cooldownMinutes));
+    }
+    
+    /**
+     * Проверяет, не превышен ли дневной лимит fast checkout
+     */
+    public boolean canFastCheckoutToday(int dailyLimit) {
+        resetFastCheckoutCountIfNeeded();
+        return fastCheckoutTodayCount == null || fastCheckoutTodayCount < dailyLimit;
+    }
+    
+    /**
+     * Сбрасывает счётчик fast checkout, если наступил новый день
+     */
+    public void resetFastCheckoutCountIfNeeded() {
+        if (fastCheckoutCountResetAt == null || 
+            !fastCheckoutCountResetAt.toLocalDate().equals(java.time.LocalDate.now())) {
+            fastCheckoutTodayCount = 0;
+            fastCheckoutCountResetAt = LocalDateTime.now();
+        }
+    }
+    
+    /**
+     * Увеличивает счётчик fast checkout
+     */
+    public void incrementFastCheckoutCount() {
+        resetFastCheckoutCountIfNeeded();
+        if (fastCheckoutTodayCount == null) {
+            fastCheckoutTodayCount = 0;
+        }
+        fastCheckoutTodayCount++;
+        lastFastCheckoutAt = LocalDateTime.now();
+    }
+    
+    /**
+     * Обновляет статистику после покупки
+     */
+    public void recordPurchase(Double amount, boolean isFastCheckout) {
+        LocalDateTime now = LocalDateTime.now();
+        
+        if (firstPurchaseAt == null) {
+            firstPurchaseAt = now;
+        }
+        lastPurchaseAt = now;
+        
+        if (purchasesCount == null) purchasesCount = 0;
+        purchasesCount++;
+        
+        if (isFastCheckout) {
+            if (visitsCount == null) visitsCount = 0;
+            visitsCount++;
+        }
+        
+        if (amount != null && amount > 0) {
+            if (totalSpend == null) totalSpend = 0.0;
+            totalSpend += amount;
+        }
+    }
+    
+    /**
+     * Возвращает информацию о статусе клиента
+     */
+    public String getStatusInfo() {
+        if (customerStatus == null) {
+            return CustomerStatus.NEW.getDisplayWithEmoji();
+        }
+        return customerStatus.getDisplayWithEmoji();
     }
 }

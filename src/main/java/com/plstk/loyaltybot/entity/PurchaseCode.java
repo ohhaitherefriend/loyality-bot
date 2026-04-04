@@ -28,7 +28,30 @@ public class PurchaseCode {
     private User user;
     
     @Enumerated(EnumType.STRING)
+    @Builder.Default
     private CodeStatus status = CodeStatus.ACTIVE;
+    
+    /**
+     * ID локации (для сетей с несколькими точками)
+     */
+    private String locationId;
+    
+    /**
+     * Был ли код создан через QR deep-link
+     */
+    @Builder.Default
+    private Boolean fromDeepLink = false;
+    
+    /**
+     * Был ли код использован через fast checkout
+     */
+    @Builder.Default
+    private Boolean fastCheckout = false;
+    
+    /**
+     * Сумма покупки (заполняется после использования)
+     */
+    private Double purchaseAmount;
     
     private LocalDateTime createdAt;
     private LocalDateTime expiresAt;
@@ -44,7 +67,11 @@ public class PurchaseCode {
     }
     
     public boolean isExpired() {
-        return LocalDateTime.now().isAfter(expiresAt);
+        return expiresAt != null && LocalDateTime.now().isAfter(expiresAt);
+    }
+    
+    public boolean isActive() {
+        return status == CodeStatus.ACTIVE && !isExpired();
     }
     
     public enum CodeStatus {

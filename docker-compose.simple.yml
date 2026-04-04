@@ -15,7 +15,9 @@ services:
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
       
       # Admin
-      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:-plstkwrld}
+      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:?ADMIN_SECRET_CODE is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
     ports:
       - "8080:8080"
     volumes:

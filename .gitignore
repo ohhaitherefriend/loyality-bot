@@ -32,6 +32,10 @@ build/
 ### VS Code ###
 .vscode/
 
+### Node ###
+node_modules/
+.DS_Store
+
 ### Database ###
 data/
 *.db
@@ -44,4 +48,9 @@ logs/
 
 ### Environment ###
 .env
-.env.local
+.env.*
+!.env.example
+!env.example
+*.env
+application-local.yml
+application-local.properties
