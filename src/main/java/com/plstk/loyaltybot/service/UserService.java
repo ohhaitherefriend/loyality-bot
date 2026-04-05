@@ -129,27 +129,31 @@ public class UserService {
      */
     @Transactional
     public User checkAndUpdateDiscount(User user) {
-        // Если накопительные скидки отключены - ничего не делаем
-        if (!shopSettingsService.isDiscountTiersEnabled()) {
+        String shopId = user.getShopId();
+        boolean tiersEnabled = shopId != null 
+            ? shopSettingsService.isDiscountTiersEnabled(shopId)
+            : shopSettingsService.isDiscountTiersEnabled();
+        
+        if (!tiersEnabled) {
             return user;
         }
         
-        // Получаем дату с которой считаем накопления
-        LocalDateTime startDate = user.getAccumulationStartDate();
+        int validityDays = shopId != null
+            ? shopSettingsService.getDiscountValidityDays(shopId)
+            : shopSettingsService.getDiscountValidityDays();
         
-        // Считаем сумму покупок с этой даты
+        LocalDateTime startDate = user.getAccumulationStartDate();
         double accumulated = transactionService.getAccumulatedAmountSince(user, startDate);
         
-        // Определяем уровень скидки на основе накопленной суммы (из настроек)
-        Integer newDiscountLevel = shopSettingsService.calculateDiscountLevel(accumulated);
+        Integer newDiscountLevel = shopId != null
+            ? shopSettingsService.calculateDiscountLevel(shopId, accumulated)
+            : shopSettingsService.calculateDiscountLevel(accumulated);
         
-        boolean wasDiscountActive = user.isDiscountValid();
+        boolean wasDiscountActive = user.isDiscountValid(validityDays);
         Integer oldDiscountLevel = user.getDiscountLevel();
         
-        // Проверяем, нужно ли активировать или продлить скидку
         if (newDiscountLevel != null) {
             if (!wasDiscountActive) {
-                // Скидки не было - активируем новую
                 user.setDiscountLevel(newDiscountLevel);
                 user.setDiscountEarnedAt(LocalDateTime.now());
                 
@@ -158,9 +162,10 @@ public class UserService {
                 
                 return userRepository.save(user);
             } else if (newDiscountLevel >= oldDiscountLevel) {
-                // Скидка была - продлеваем или повышаем уровень
                 user.setDiscountLevel(newDiscountLevel);
-                user.setDiscountEarnedAt(LocalDateTime.now()); // Продлеваем на 30 дней
+                if (validityDays > 0) {
+                    user.setDiscountEarnedAt(LocalDateTime.now());
+                }
                 
                 log.info("User {} extended discount! Level: {}%, accumulated: {}", 
                     user.getChatId(), newDiscountLevel, accumulated);

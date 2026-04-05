@@ -40,6 +40,8 @@ services:
       ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:?ADMIN_SECRET_CODE is required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      SERVER_BASE_URL: ${SERVER_BASE_URL:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
     ports:
       - "8080:8080"
     depends_on:

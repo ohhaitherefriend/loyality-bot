@@ -98,7 +98,7 @@ export const discountTiersSettingsSchema = z.object({
     .max(50, 'Максимум 50%'),
   discountValidityDays: z
     .number()
-    .min(1, 'Минимум 1 день')
+    .min(0, 'Минимум 0 (бессрочная)')
     .max(365, 'Максимум 365 дней'),
 })
 

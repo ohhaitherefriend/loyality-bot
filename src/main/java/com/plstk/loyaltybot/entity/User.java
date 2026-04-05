@@ -162,7 +162,7 @@ public class User {
     
     /**
      * Возвращает процент скидки (5%, 7% или 10%)
-     * Скидка действительна только если не истек срок действия (30 дней)
+     * Скидка действительна только если не истёк срок действия
      */
     public double getDiscountPercent() {
         if (!isDiscountValid()) {
@@ -177,6 +177,20 @@ public class User {
     }
     
     /**
+     * Возвращает процент скидки с учётом заданного срока действия.
+     * @param validityDays 0 = бессрочная
+     */
+    public double getDiscountPercent(int validityDays) {
+        if (!isDiscountValid(validityDays)) {
+            return 0.0;
+        }
+        if (discountLevel == null) {
+            return 0.0;
+        }
+        return discountLevel / 100.0;
+    }
+    
+    /**
      * Возвращает наибольший процент скидки среди истекающей и постоянной.
      */
     public double getEffectiveDiscountPercent() {
@@ -186,26 +200,50 @@ public class User {
     }
     
     /**
-     * Проверяет, действительна ли скидка (не прошло ли 30 дней с момента активации)
+     * Возвращает наибольший процент скидки с учётом срока действия из настроек.
      */
-    public boolean isDiscountValid() {
-        if (discountEarnedAt == null || discountLevel == null) {
-            return false;
-        }
-        
-        // Проверяем, не прошло ли 30 дней с момента активации
-        return LocalDateTime.now().isBefore(discountEarnedAt.plusDays(30));
+    public double getEffectiveDiscountPercent(int validityDays) {
+        double expiring = getDiscountPercent(validityDays);
+        double permanent = permanentDiscountPercent != null ? permanentDiscountPercent / 100.0 : 0.0;
+        return Math.max(expiring, permanent);
     }
     
     /**
-     * Возвращает дату истечения скидки
+     * Проверяет, действительна ли скидка (дефолт: 30 дней)
+     */
+    public boolean isDiscountValid() {
+        return isDiscountValid(30);
+    }
+    
+    /**
+     * Проверяет, действительна ли скидка.
+     * @param validityDays 0 = бессрочная (никогда не истекает)
+     */
+    public boolean isDiscountValid(int validityDays) {
+        if (discountEarnedAt == null || discountLevel == null) {
+            return false;
+        }
+        if (validityDays <= 0) {
+            return true;
+        }
+        return LocalDateTime.now().isBefore(discountEarnedAt.plusDays(validityDays));
+    }
+    
+    /**
+     * Возвращает дату истечения скидки (null = бессрочная)
      */
     public LocalDateTime getDiscountExpiresAt() {
-        if (discountEarnedAt == null) {
+        return getDiscountExpiresAt(30);
+    }
+    
+    /**
+     * @param validityDays 0 = бессрочная, возвращает null
+     */
+    public LocalDateTime getDiscountExpiresAt(int validityDays) {
+        if (discountEarnedAt == null || validityDays <= 0) {
             return null;
         }
-        
-        return discountEarnedAt.plusDays(30);
+        return discountEarnedAt.plusDays(validityDays);
     }
     
     /**

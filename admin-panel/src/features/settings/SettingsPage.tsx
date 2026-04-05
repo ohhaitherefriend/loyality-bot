@@ -659,7 +659,9 @@ export function SettingsPage() {
                       <Alert>
                         <Info className="h-4 w-4" />
                         <AlertDescription>
-                          Клиенты накапливают сумму покупок и получают скидку на следующие {form.watch('discountValidityDays')} дней
+                          {form.watch('discountValidityDays') === 0
+                            ? 'Клиенты накапливают сумму покупок и получают бессрочную скидку'
+                            : `Клиенты накапливают сумму покупок и получают скидку на следующие ${form.watch('discountValidityDays')} дней`}
                         </AlertDescription>
                       </Alert>
 
@@ -728,34 +730,51 @@ export function SettingsPage() {
 
                       <Separator />
 
-                      <div className="space-y-2">
-                        <Label htmlFor="validityDays">
-                          Срок действия скидки (дней)
-                        </Label>
-                        <Input
-                          id="validityDays"
-                          type="number"
-                          className="w-32"
-                          {...form.register('discountValidityDays', { valueAsNumber: true })}
+                      <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                          <Label>Бессрочная скидка</Label>
+                          <p className="text-sm text-muted-foreground">
+                            Скидка не сгорает после достижения уровня
+                          </p>
+                        </div>
+                        <Switch
+                          checked={form.watch('discountValidityDays') === 0}
+                          onCheckedChange={(checked) => {
+                            form.setValue('discountValidityDays', checked ? 0 : 30, { shouldDirty: true })
+                          }}
                         />
-                        <p className="text-xs text-muted-foreground">
-                          После достижения уровня скидка действует указанное количество дней
-                        </p>
                       </div>
+
+                      {form.watch('discountValidityDays') !== 0 && (
+                        <div className="space-y-2">
+                          <Label htmlFor="validityDays">
+                            Срок действия скидки (дней)
+                          </Label>
+                          <Input
+                            id="validityDays"
+                            type="number"
+                            className="w-32"
+                            {...form.register('discountValidityDays', { valueAsNumber: true })}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            После достижения уровня скидка действует указанное количество дней
+                          </p>
+                        </div>
+                      )}
                     </motion.div>
                   )}
 
                   <Separator className="my-6" />
 
-                  {/* Permanent Discount */}
+                  {/* Permanent Discount (dynamic tiers) */}
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label className="flex items-center gap-2">
                         <Diamond className="h-4 w-4 text-blue-500" />
-                        Постоянные скидки
+                        Постоянная накопительная скидка
                       </Label>
                       <p className="text-sm text-muted-foreground">
-                        Скидка НЕ сгорает, основана на общей сумме покупок за всё время
+                        Отдельная система с настраиваемым количеством уровней, по общей сумме покупок за всё время
                       </p>
                     </div>
                     <Controller
@@ -779,8 +798,8 @@ export function SettingsPage() {
                       <Alert>
                         <Info className="h-4 w-4" />
                         <AlertDescription>
-                          Постоянная скидка начисляется от общей суммы покупок клиента за всё время и никогда не сгорает.
-                          Если включены оба типа скидок, клиент получает наибольшую из двух.
+                          Скидка рассчитывается от общей суммы покупок клиента за всё время и никогда не сгорает.
+                          Добавьте любое количество уровней. Если включены оба типа скидок, клиент получает наибольшую.
                         </AlertDescription>
                       </Alert>
 
