@@ -110,6 +110,12 @@ public class User {
      */
     private Integer permanentDiscountPercent;
     
+    /**
+     * Баланс бонусных баллов (1 балл = 1 рубль)
+     */
+    @Builder.Default
+    private Double bonusBalance = 0.0;
+    
     // ========== Устаревшие поля ==========
     
     // Устаревшие поля (для обратной совместимости, будут удалены после миграции)
@@ -191,21 +197,18 @@ public class User {
     }
     
     /**
-     * Возвращает наибольший процент скидки среди истекающей и постоянной.
+     * Возвращает процент скидки (дефолт: 30 дней). Для бессрочных скидок используйте getEffectiveDiscountPercent(0).
      */
     public double getEffectiveDiscountPercent() {
-        double expiring = getDiscountPercent();
-        double permanent = permanentDiscountPercent != null ? permanentDiscountPercent / 100.0 : 0.0;
-        return Math.max(expiring, permanent);
+        return getDiscountPercent();
     }
     
     /**
-     * Возвращает наибольший процент скидки с учётом срока действия из настроек.
+     * Возвращает процент скидки с учётом срока действия из настроек.
+     * @param validityDays 0 = бессрочная
      */
     public double getEffectiveDiscountPercent(int validityDays) {
-        double expiring = getDiscountPercent(validityDays);
-        double permanent = permanentDiscountPercent != null ? permanentDiscountPercent / 100.0 : 0.0;
-        return Math.max(expiring, permanent);
+        return getDiscountPercent(validityDays);
     }
     
     /**

@@ -36,14 +36,18 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 
-function parsePermanentTiers(json?: string): PermanentDiscountTier[] {
-  if (!json) return []
-  try {
-    const parsed = JSON.parse(json)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
+function parseDiscountTiers(settings: import('@/api/types').ShopSettings): PermanentDiscountTier[] {
+  if (settings.permanentDiscountTiers) {
+    try {
+      const parsed = JSON.parse(settings.permanentDiscountTiers)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed
+    } catch { /* fall through */ }
   }
+  return [
+    { amount: settings.discountTier1Amount, percent: settings.discountTier1Percent },
+    { amount: settings.discountTier2Amount, percent: settings.discountTier2Percent },
+    { amount: settings.discountTier3Amount, percent: settings.discountTier3Percent },
+  ]
 }
 
 function SettingsSkeleton() {
@@ -104,6 +108,9 @@ export function SettingsPage() {
       discountValidityDays: 30,
       permanentDiscountEnabled: false,
       permanentDiscountTiersList: [],
+      bonusPointsEnabled: false,
+      bonusCashbackPercent: 5,
+      bonusMaxSpendPercent: 100,
       telegramChannelUrl: '',
       defaultLocationId: '',
       autoMessagesEnabled: true,
@@ -140,8 +147,11 @@ export function SettingsPage() {
         discountTier3Amount: settings.discountTier3Amount,
         discountTier3Percent: settings.discountTier3Percent,
         discountValidityDays: settings.discountValidityDays,
-        permanentDiscountEnabled: settings.permanentDiscountEnabled ?? false,
-        permanentDiscountTiersList: parsePermanentTiers(settings.permanentDiscountTiers),
+        permanentDiscountEnabled: false,
+        permanentDiscountTiersList: parseDiscountTiers(settings),
+        bonusPointsEnabled: settings.bonusPointsEnabled ?? false,
+        bonusCashbackPercent: settings.bonusCashbackPercent ?? 5,
+        bonusMaxSpendPercent: settings.bonusMaxSpendPercent ?? 100,
         telegramChannelUrl: settings.telegramChannelUrl || '',
         defaultLocationId: settings.defaultLocationId || '',
         autoMessagesEnabled: settings.autoMessagesEnabled,
@@ -188,7 +198,7 @@ export function SettingsPage() {
   const watchFastCheckout = form.watch('fastCheckoutEnabled')
   const watchStamps = form.watch('stampsEnabled')
   const watchDiscounts = form.watch('discountTiersEnabled')
-  const watchPermanentDiscounts = form.watch('permanentDiscountEnabled')
+  const watchBonus = form.watch('bonusPointsEnabled')
   const isDirty = form.formState.isDirty
 
   const { fields: permanentTierFields, append: appendTier, remove: removeTier } = useFieldArray({
@@ -619,7 +629,9 @@ export function SettingsPage() {
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
             >
+              {/* Накопительные скидки */}
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -654,79 +666,62 @@ export function SettingsPage() {
                     <motion.div
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: 'auto' }}
-                      className="space-y-6 pl-4 border-l-2 border-success/30"
+                      className="space-y-4 pl-4 border-l-2 border-success/30"
                     >
                       <Alert>
                         <Info className="h-4 w-4" />
                         <AlertDescription>
                           {form.watch('discountValidityDays') === 0
-                            ? 'Клиенты накапливают сумму покупок и получают бессрочную скидку'
-                            : `Клиенты накапливают сумму покупок и получают скидку на следующие ${form.watch('discountValidityDays')} дней`}
+                            ? 'Скидка НЕ сгорает после достижения уровня'
+                            : `Скидка действует ${form.watch('discountValidityDays')} дней после достижения уровня`}
                         </AlertDescription>
                       </Alert>
 
-                      {/* Tier 1 */}
-                      <div className="space-y-3">
-                        <h4 className="font-medium text-sm text-muted-foreground">Уровень 1</h4>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label>Сумма покупок (₽)</Label>
+                      {/* Dynamic tiers */}
+                      {permanentTierFields.map((field, index) => (
+                        <div key={field.id} className="flex items-end gap-3">
+                          <div className="space-y-1 flex-1">
+                            <Label className="text-xs text-muted-foreground">
+                              Сумма покупок (₽)
+                            </Label>
                             <Input
                               type="number"
-                              {...form.register('discountTier1Amount', { valueAsNumber: true })}
+                              placeholder="50000"
+                              {...form.register(`permanentDiscountTiersList.${index}.amount`, { valueAsNumber: true })}
                             />
                           </div>
-                          <div className="space-y-2">
-                            <Label>Скидка (%)</Label>
+                          <div className="space-y-1 w-28">
+                            <Label className="text-xs text-muted-foreground">
+                              Скидка (%)
+                            </Label>
                             <Input
                               type="number"
-                              {...form.register('discountTier1Percent', { valueAsNumber: true })}
+                              placeholder="5"
+                              {...form.register(`permanentDiscountTiersList.${index}.percent`, { valueAsNumber: true })}
                             />
                           </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive/80 shrink-0"
+                            onClick={() => removeTier(index)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
-                      </div>
+                      ))}
 
-                      {/* Tier 2 */}
-                      <div className="space-y-3">
-                        <h4 className="font-medium text-sm text-muted-foreground">Уровень 2</h4>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label>Сумма покупок (₽)</Label>
-                            <Input
-                              type="number"
-                              {...form.register('discountTier2Amount', { valueAsNumber: true })}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label>Скидка (%)</Label>
-                            <Input
-                              type="number"
-                              {...form.register('discountTier2Percent', { valueAsNumber: true })}
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Tier 3 */}
-                      <div className="space-y-3">
-                        <h4 className="font-medium text-sm text-muted-foreground">Уровень 3 (максимум)</h4>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label>Сумма покупок (₽)</Label>
-                            <Input
-                              type="number"
-                              {...form.register('discountTier3Amount', { valueAsNumber: true })}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label>Скидка (%)</Label>
-                            <Input
-                              type="number"
-                              {...form.register('discountTier3Percent', { valueAsNumber: true })}
-                            />
-                          </div>
-                        </div>
-                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-2"
+                        onClick={() => appendTier({ amount: 0, percent: 0 })}
+                      >
+                        <Plus className="h-4 w-4" />
+                        Добавить уровень
+                      </Button>
 
                       <Separator />
 
@@ -763,22 +758,30 @@ export function SettingsPage() {
                       )}
                     </motion.div>
                   )}
+                </CardContent>
+              </Card>
 
-                  <Separator className="my-6" />
-
-                  {/* Permanent Discount (dynamic tiers) */}
+              {/* Балльная система (кэшбек) */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Diamond className="h-5 w-5 text-blue-500" />
+                    Балльная система (кэшбек)
+                  </CardTitle>
+                  <CardDescription>
+                    Процент от каждой покупки возвращается клиенту баллами
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-6">
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <Label className="flex items-center gap-2">
-                        <Diamond className="h-4 w-4 text-blue-500" />
-                        Постоянная накопительная скидка
-                      </Label>
+                      <Label>Включить балльную систему</Label>
                       <p className="text-sm text-muted-foreground">
-                        Отдельная система с настраиваемым количеством уровней, по общей сумме покупок за всё время
+                        Клиенты получают баллы с каждой покупки и могут тратить их
                       </p>
                     </div>
                     <Controller
-                      name="permanentDiscountEnabled"
+                      name="bonusPointsEnabled"
                       control={form.control}
                       render={({ field }) => (
                         <Switch
@@ -789,7 +792,7 @@ export function SettingsPage() {
                     />
                   </div>
 
-                  {watchPermanentDiscounts && (
+                  {watchBonus && (
                     <motion.div
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: 'auto' }}
@@ -798,55 +801,35 @@ export function SettingsPage() {
                       <Alert>
                         <Info className="h-4 w-4" />
                         <AlertDescription>
-                          Скидка рассчитывается от общей суммы покупок клиента за всё время и никогда не сгорает.
-                          Добавьте любое количество уровней. Если включены оба типа скидок, клиент получает наибольшую.
+                          Клиент покупает на 1000₽ при кэшбеке {form.watch('bonusCashbackPercent')}% → получает {Math.round(1000 * (form.watch('bonusCashbackPercent') || 0) / 100)} баллов.
+                          1 балл = 1₽ при оплате.
                         </AlertDescription>
                       </Alert>
 
-                      {permanentTierFields.map((field, index) => (
-                        <div key={field.id} className="flex items-end gap-3">
-                          <div className="space-y-1 flex-1">
-                            <Label className="text-xs text-muted-foreground">
-                              Сумма покупок (₽)
-                            </Label>
-                            <Input
-                              type="number"
-                              placeholder="100000"
-                              {...form.register(`permanentDiscountTiersList.${index}.amount`, { valueAsNumber: true })}
-                            />
-                          </div>
-                          <div className="space-y-1 w-28">
-                            <Label className="text-xs text-muted-foreground">
-                              Скидка (%)
-                            </Label>
-                            <Input
-                              type="number"
-                              placeholder="1"
-                              {...form.register(`permanentDiscountTiersList.${index}.percent`, { valueAsNumber: true })}
-                            />
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            className="text-destructive hover:text-destructive/80 shrink-0"
-                            onClick={() => removeTier(index)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="bonusCashbackPercent">Процент кэшбека</Label>
+                          <Input
+                            id="bonusCashbackPercent"
+                            type="number"
+                            {...form.register('bonusCashbackPercent', { valueAsNumber: true })}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Сколько % от покупки возвращается баллами
+                          </p>
                         </div>
-                      ))}
-
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-2"
-                        onClick={() => appendTier({ amount: 0, percent: 0 })}
-                      >
-                        <Plus className="h-4 w-4" />
-                        Добавить уровень
-                      </Button>
+                        <div className="space-y-2">
+                          <Label htmlFor="bonusMaxSpendPercent">Максимум оплаты баллами (%)</Label>
+                          <Input
+                            id="bonusMaxSpendPercent"
+                            type="number"
+                            {...form.register('bonusMaxSpendPercent', { valueAsNumber: true })}
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Какую часть покупки можно оплатить баллами (100% = без ограничений)
+                          </p>
+                        </div>
+                      </div>
                     </motion.div>
                   )}
                 </CardContent>

@@ -75,9 +75,9 @@ const loyaltyModes: Array<{
   },
   {
     value: 'BONUS',
-    label: 'Бонусы / проценты',
-    subtitle: 'Часть суммы возвращается клиенту',
-    micro: 'Подходит для магазинов и регулярных покупок',
+    label: 'Балльная система',
+    subtitle: 'Процент от покупки возвращается баллами',
+    micro: 'Клиенты копят и тратят баллы',
     icon: ShoppingBag,
     color: 'from-emerald-500 to-teal-500',
   },
@@ -455,7 +455,7 @@ export function OnboardingPage() {
 
                     {loyaltyMode === 'BONUS' && (
                       <div className="space-y-3">
-                        <Label htmlFor="bonusPercent">Процент возврата</Label>
+                        <Label htmlFor="bonusPercent">Процент кэшбека</Label>
                         <div className="max-w-xs">
                           <Input
                             id="bonusPercent"
@@ -471,7 +471,8 @@ export function OnboardingPage() {
                           )}
                         </div>
                         <p className="text-sm text-muted-foreground">
-                          Бонусы копятся и могут быть использованы позже
+                          Покупка на 1000₽ при {mechanicForm.watch('bonusPercent') || 5}% кэшбеке = {Math.round(1000 * (mechanicForm.watch('bonusPercent') || 5) / 100)} баллов на счёт.
+                          Баллами можно оплатить часть следующей покупки.
                         </p>
                       </div>
                     )}

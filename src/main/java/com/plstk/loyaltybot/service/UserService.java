@@ -191,41 +191,19 @@ public class UserService {
      */
     @Transactional
     public double processPurchase(User user) {
-        double discountPercent = user.getEffectiveDiscountPercent();
+        String shopId = user.getShopId();
+        int validityDays = shopId != null
+            ? shopSettingsService.getDiscountValidityDays(shopId)
+            : shopSettingsService.getDiscountValidityDays();
+        
+        double discountPercent = user.getEffectiveDiscountPercent(validityDays);
         
         checkAndUpdateDiscount(user);
-        checkAndUpdatePermanentDiscount(user);
         
         log.info("Processed purchase for user {}, applied discount: {}%", 
             user.getChatId(), discountPercent * 100);
         
         return discountPercent;
-    }
-    
-    /**
-     * Проверяет общую сумму покупок пользователя и обновляет постоянную скидку если нужно.
-     * Постоянная скидка никогда не сгорает и только растёт.
-     */
-    @Transactional
-    public User checkAndUpdatePermanentDiscount(User user) {
-        String shopId = user.getShopId();
-        
-        if (shopId == null || !shopSettingsService.isPermanentDiscountEnabled(shopId)) {
-            return user;
-        }
-        
-        double totalSpend = user.getTotalSpend() != null ? user.getTotalSpend() : 0.0;
-        Integer newLevel = shopSettingsService.calculatePermanentDiscountLevel(shopId, totalSpend);
-        Integer currentLevel = user.getPermanentDiscountPercent();
-        
-        if (newLevel != null && (currentLevel == null || newLevel > currentLevel)) {
-            user.setPermanentDiscountPercent(newLevel);
-            log.info("User {} earned permanent discount {}% (totalSpend={})", 
-                user.getChatId(), newLevel, totalSpend);
-            return userRepository.save(user);
-        }
-        
-        return user;
     }
     
     public List<User> findAllRegisteredUsers() {

@@ -40,6 +40,7 @@ public class LoyaltyBotService {
     private final ManualBadgeService manualBadgeService;
     private final WeeklyReportService weeklyReportService;
     private final ClientMemoryService clientMemoryService;
+    private final BonusService bonusService;
     
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
     
@@ -292,10 +293,6 @@ public class LoyaltyBotService {
             registrationMessage.append("\n").append(shopSettingsService.getDiscountTiersDescription(shopId));
         }
         
-        if (shopSettingsService.isPermanentDiscountEnabled(shopId)) {
-            registrationMessage.append("\n").append(shopSettingsService.getPermanentDiscountDescription(shopId));
-        }
-        
         if (shopSettingsService.isStampsEnabled(shopId)) {
             registrationMessage.append("\n\n☕ *Программа штампов*\n");
             registrationMessage.append("Собирайте штампы за каждую покупку!\n");
@@ -332,23 +329,21 @@ public class LoyaltyBotService {
         message.append(customerProfileService.getStatusProgressInfo(user)).append("\n\n");
         
         if (shopSettingsService.isDiscountTiersEnabled(shopId)) {
+            int validityDays = shopSettingsService.getDiscountValidityDays(shopId);
             double accumulated = userService.getAccumulatedAmount(user);
-            message.append("💰 Накоплено за период: *").append(String.format("%.2f", accumulated)).append("* руб.\n");
-        }
-        
-        if (shopSettingsService.isPermanentDiscountEnabled(shopId)) {
-            double totalSpend = user.getTotalSpend() != null ? user.getTotalSpend() : 0.0;
-            Integer permPercent = user.getPermanentDiscountPercent();
-            if (permPercent != null && permPercent > 0) {
-                message.append("💎 Постоянная скидка: *").append(permPercent).append("%*\n");
+            double effectiveDiscount = user.getEffectiveDiscountPercent(validityDays);
+            
+            if (effectiveDiscount > 0) {
+                message.append("🏷 Ваша скидка: *").append(String.format("%.0f", effectiveDiscount * 100)).append("%*\n");
             }
-            message.append("💰 Всего покупок: *").append(String.format("%.0f", totalSpend)).append("* руб.\n");
-            message.append(shopSettingsService.getPermanentDiscountProgressInfo(shopId, totalSpend)).append("\n");
+            message.append("💰 Накоплено: *").append(String.format("%.0f", accumulated)).append("* руб.\n");
+            
+            ShopSettings settings = shopSettingsService.getSettings(shopId);
+            message.append(settings.getDiscountProgressInfo(accumulated, user.getDiscountLevel(), user.isDiscountValid(validityDays))).append("\n");
         }
         
-        double effectiveDiscount = user.getEffectiveDiscountPercent();
-        if (effectiveDiscount > 0) {
-            message.append("\n🏷 Ваша текущая скидка: *").append(String.format("%.0f", effectiveDiscount * 100)).append("%*\n");
+        if (bonusService.isEnabled(shopId)) {
+            message.append(bonusService.getBalanceInfo(user)).append("\n");
         }
         
         if (shopSettingsService.isStampsEnabled(shopId)) {
@@ -533,15 +528,17 @@ public class LoyaltyBotService {
                 purchaseAmount, purchaseCode, admin
             );
             
-            // Обновляем профиль и скидки (включая постоянную)
             customer.recordPurchase(purchaseAmount, false);
             userService.processPurchase(customer);
+            
+            // Начисляем бонусы
+            double bonusAccrued = bonusService.accrueBonus(customer, purchaseAmount);
             
             pendingPurchaseCodes.remove(key);
             userService.updateUserState(admin, User.UserState.REGISTERED);
             
-            // Сообщения админу и клиенту
-            double effectiveDiscount = customer.getEffectiveDiscountPercent();
+            int validityDays = shopSettingsService.getDiscountValidityDays(shopId);
+            double effectiveDiscount = customer.getEffectiveDiscountPercent(validityDays);
             String discountInfo = effectiveDiscount > 0 
                 ? String.format("\n🏷 Скидка клиента: %.0f%%", effectiveDiscount * 100) 
                 : "";
@@ -558,9 +555,16 @@ public class LoyaltyBotService {
             if (effectiveDiscount > 0) {
                 customerMsg.append("🏷 Ваша скидка: *").append(String.format("%.0f", effectiveDiscount * 100)).append("%*\n");
             }
-            if (shopSettingsService.isPermanentDiscountEnabled(shopId)) {
-                double totalSpend = customer.getTotalSpend() != null ? customer.getTotalSpend() : 0.0;
-                customerMsg.append(shopSettingsService.getPermanentDiscountProgressInfo(shopId, totalSpend));
+            if (bonusAccrued > 0) {
+                customerMsg.append(String.format("💳 +%.0f баллов! Баланс: %.0f\n", bonusAccrued, bonusService.getBalance(customer)));
+            }
+            if (shopSettingsService.isDiscountTiersEnabled(shopId)) {
+                ShopSettings settings = shopSettingsService.getSettings(shopId);
+                double accumulated = userService.getAccumulatedAmount(customer);
+                String progress = settings.getDiscountProgressInfo(accumulated, customer.getDiscountLevel(), true);
+                if (!progress.isEmpty()) {
+                    customerMsg.append(progress).append("\n");
+                }
             }
             
             sendMessage(ctx, customer.getChatId(), customerMsg.toString(), null, true);
@@ -749,7 +753,7 @@ public class LoyaltyBotService {
             if (shopSettingsService.isStampsEnabled(shopId)) {
                 row2.add(Map.of("text", BTN_STAMPS));
             }
-            if (shopSettingsService.isDiscountTiersEnabled(shopId) || shopSettingsService.isPermanentDiscountEnabled(shopId)) {
+            if (shopSettingsService.isDiscountTiersEnabled(shopId)) {
                 row2.add(Map.of("text", BTN_DISCOUNTS));
             }
             if (!row2.isEmpty()) {

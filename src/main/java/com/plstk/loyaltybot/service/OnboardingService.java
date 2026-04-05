@@ -314,17 +314,12 @@ public class OnboardingService {
             case BONUS -> {
                 settings.setStampsEnabled(false);
                 settings.setFastCheckoutEnabled(false);
-                settings.setDiscountTiersEnabled(true);
-                settings.setDiscountTier1Amount(20000.0);
-                settings.setDiscountTier2Amount(25000.0);
-                settings.setDiscountTier3Amount(30000.0);
-                
-                int tier1Percent = draft != null && draft.bonusPercent() != null ? draft.bonusPercent() : 5;
-                int tier2Percent = Math.max(7, tier1Percent);
-                int tier3Percent = Math.max(10, tier2Percent);
-                settings.setDiscountTier1Percent(tier1Percent);
-                settings.setDiscountTier2Percent(tier2Percent);
-                settings.setDiscountTier3Percent(tier3Percent);
+                settings.setDiscountTiersEnabled(false);
+                settings.setBonusPointsEnabled(true);
+                settings.setBonusCashbackPercent(
+                    draft != null && draft.bonusPercent() != null ? draft.bonusPercent() : 5
+                );
+                settings.setBonusMaxSpendPercent(100);
             }
             case CUMULATIVE_DISCOUNT -> {
                 settings.setStampsEnabled(false);
@@ -334,11 +329,11 @@ public class OnboardingService {
                 
                 int basePercent = draft != null && draft.bonusPercent() != null ? draft.bonusPercent() : 1;
                 var defaultTiers = List.of(
-                    new ShopSettings.PermanentTier(50000.0, basePercent),
-                    new ShopSettings.PermanentTier(100000.0, basePercent * 2),
-                    new ShopSettings.PermanentTier(200000.0, basePercent * 3)
+                    new ShopSettings.DiscountTier(50000.0, basePercent),
+                    new ShopSettings.DiscountTier(100000.0, basePercent * 2),
+                    new ShopSettings.DiscountTier(200000.0, basePercent * 3)
                 );
-                settings.setPermanentDiscountTiersList(defaultTiers);
+                settings.setDiscountTiersList(defaultTiers);
             }
         }
         

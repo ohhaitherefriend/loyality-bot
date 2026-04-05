@@ -1,0 +1,4 @@
+ALTER TABLE shop_settings ADD COLUMN bonus_points_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE shop_settings ADD COLUMN bonus_cashback_percent INTEGER NOT NULL DEFAULT 5;
+ALTER TABLE shop_settings ADD COLUMN bonus_max_spend_percent INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE users ADD COLUMN bonus_balance DOUBLE PRECISION NOT NULL DEFAULT 0;

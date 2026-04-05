@@ -337,9 +337,14 @@ public class AdminApiController {
             if (request.discountTier3Percent() != null) current.setDiscountTier3Percent(request.discountTier3Percent());
             if (request.discountValidityDays() != null) current.setDiscountValidityDays(request.discountValidityDays());
             
-            // Постоянная скидка
+            // Динамические уровни скидок (JSON)
             if (request.permanentDiscountEnabled() != null) current.setPermanentDiscountEnabled(request.permanentDiscountEnabled());
             if (request.permanentDiscountTiers() != null) current.setPermanentDiscountTiers(request.permanentDiscountTiers());
+            
+            // Балльная система
+            if (request.bonusPointsEnabled() != null) current.setBonusPointsEnabled(request.bonusPointsEnabled());
+            if (request.bonusCashbackPercent() != null) current.setBonusCashbackPercent(request.bonusCashbackPercent());
+            if (request.bonusMaxSpendPercent() != null) current.setBonusMaxSpendPercent(request.bonusMaxSpendPercent());
             
             // Кастомные сообщения
             if (request.welcomeMessage() != null) current.setWelcomeMessage(request.welcomeMessage());
@@ -534,9 +539,13 @@ public class AdminApiController {
         Double discountTier3Amount,
         Integer discountTier3Percent,
         Integer discountValidityDays,
-        // Постоянная скидка
+        // Постоянная скидка / динамические уровни
         Boolean permanentDiscountEnabled,
         String permanentDiscountTiers,
+        // Балльная система
+        Boolean bonusPointsEnabled,
+        Integer bonusCashbackPercent,
+        Integer bonusMaxSpendPercent,
         // Кастомные сообщения
         String welcomeMessage,
         String purchaseCodeMessage,

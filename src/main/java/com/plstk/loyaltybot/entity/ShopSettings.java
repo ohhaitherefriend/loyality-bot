@@ -190,6 +190,26 @@ public class ShopSettings {
     @Builder.Default
     private Integer redeemCodeTtlMinutes = 10;
     
+    // ========== Балльная система (кэшбек) ==========
+    
+    @Column(nullable = false)
+    @Builder.Default
+    private Boolean bonusPointsEnabled = false;
+    
+    /**
+     * Процент кэшбека: сколько % от покупки возвращается баллами
+     */
+    @Column(nullable = false)
+    @Builder.Default
+    private Integer bonusCashbackPercent = 5;
+    
+    /**
+     * Максимум оплаты баллами: какую часть покупки можно оплатить (100 = без ограничений)
+     */
+    @Column(nullable = false)
+    @Builder.Default
+    private Integer bonusMaxSpendPercent = 100;
+    
     // ========== Статусы клиентов ==========
     
     /**
@@ -327,93 +347,33 @@ public class ShopSettings {
     
     // ========== Вспомогательные методы для скидок ==========
     
-    /**
-     * Рассчитывает уровень скидки на основе накопленной суммы
-     */
-    public Integer calculateDiscountLevel(double amount) {
-        if (amount >= discountTier3Amount) {
-            return discountTier3Percent;
-        } else if (amount >= discountTier2Amount) {
-            return discountTier2Percent;
-        } else if (amount >= discountTier1Amount) {
-            return discountTier1Percent;
-        }
-        return null;
-    }
+    public record DiscountTier(Double amount, Integer percent) {}
     
     /**
-     * Возвращает минимальную сумму для заданного уровня скидки
+     * Возвращает все уровни скидок: из JSON (если есть) или из фиксированных полей (fallback).
      */
-    public Double getRequiredAmountForDiscount(Integer discountPercent) {
-        if (discountPercent == null) {
-            return discountTier1Amount;
+    public List<DiscountTier> getDiscountTiersList() {
+        if (permanentDiscountTiers != null && !permanentDiscountTiers.isBlank()) {
+            try {
+                return OBJECT_MAPPER.readValue(permanentDiscountTiers, new TypeReference<>() {});
+            } catch (JsonProcessingException e) {
+                log.error("Failed to parse discountTiers JSON: {}", permanentDiscountTiers, e);
+            }
         }
-        if (discountPercent >= discountTier3Percent) {
-            return discountTier3Amount;
-        } else if (discountPercent >= discountTier2Percent) {
-            return discountTier2Amount;
+        List<DiscountTier> fallback = new ArrayList<>();
+        if (discountTier1Amount != null && discountTier1Percent != null) {
+            fallback.add(new DiscountTier(discountTier1Amount, discountTier1Percent));
         }
-        return discountTier1Amount;
+        if (discountTier2Amount != null && discountTier2Percent != null) {
+            fallback.add(new DiscountTier(discountTier2Amount, discountTier2Percent));
+        }
+        if (discountTier3Amount != null && discountTier3Percent != null) {
+            fallback.add(new DiscountTier(discountTier3Amount, discountTier3Percent));
+        }
+        return fallback;
     }
     
-    /**
-     * Возвращает текстовое описание системы скидок
-     */
-    public String getDiscountTiersDescription() {
-        if (!discountTiersEnabled) {
-            return "";
-        }
-        return String.format(
-            "💡 Накопительная система скидок:\n\n" +
-            "Накапливайте покупки и получайте скидку на %d дней!\n\n" +
-            "• %d%% скидка - от %.0f руб\n" +
-            "• %d%% скидка - от %.0f руб\n" +
-            "• %d%% скидка - от %.0f руб\n\n" +
-            "🔄 Продлевайте скидку, накопив сумму снова в течение %d дней!",
-            discountValidityDays,
-            discountTier1Percent, discountTier1Amount,
-            discountTier2Percent, discountTier2Amount,
-            discountTier3Percent, discountTier3Amount,
-            discountValidityDays
-        );
-    }
-    
-    /**
-     * Возвращает информацию о прогрессе накопления скидки
-     */
-    public String getDiscountProgressInfo(double accumulatedAmount, Integer currentDiscountLevel, boolean isDiscountValid) {
-        if (!discountTiersEnabled) {
-            return "";
-        }
-        
-        if (accumulatedAmount >= discountTier3Amount) {
-            return String.format("Накоплено на максимальную скидку %d%%! 🎉", discountTier3Percent);
-        } else if (accumulatedAmount >= discountTier2Amount) {
-            return String.format("До скидки %d%%: %.2f руб.", discountTier3Percent, discountTier3Amount - accumulatedAmount);
-        } else if (accumulatedAmount >= discountTier1Amount) {
-            return String.format("До скидки %d%%: %.2f руб.", discountTier2Percent, discountTier2Amount - accumulatedAmount);
-        } else {
-            return String.format("До скидки %d%%: %.2f руб.", discountTier1Percent, discountTier1Amount - accumulatedAmount);
-        }
-    }
-    
-    // ========== Постоянная скидка: вспомогательные методы ==========
-    
-    public record PermanentTier(Double amount, Integer percent) {}
-    
-    public List<PermanentTier> getPermanentDiscountTiersList() {
-        if (permanentDiscountTiers == null || permanentDiscountTiers.isBlank()) {
-            return new ArrayList<>();
-        }
-        try {
-            return OBJECT_MAPPER.readValue(permanentDiscountTiers, new TypeReference<>() {});
-        } catch (JsonProcessingException e) {
-            log.error("Failed to parse permanentDiscountTiers JSON: {}", permanentDiscountTiers, e);
-            return new ArrayList<>();
-        }
-    }
-    
-    public void setPermanentDiscountTiersList(List<PermanentTier> tiers) {
+    public void setDiscountTiersList(List<DiscountTier> tiers) {
         if (tiers == null || tiers.isEmpty()) {
             this.permanentDiscountTiers = null;
             return;
@@ -421,81 +381,121 @@ public class ShopSettings {
         try {
             this.permanentDiscountTiers = OBJECT_MAPPER.writeValueAsString(tiers);
         } catch (JsonProcessingException e) {
-            log.error("Failed to serialize permanentDiscountTiers to JSON", e);
+            log.error("Failed to serialize discountTiers to JSON", e);
         }
     }
     
     /**
-     * Находит наивысший уровень постоянной скидки для заданной суммы покупок за всё время.
-     * Возвращает процент скидки или null, если ни один порог не достигнут.
+     * Рассчитывает уровень скидки на основе суммы (из всех уровней).
      */
-    public Integer calculatePermanentDiscountLevel(double totalSpend) {
-        List<PermanentTier> tiers = getPermanentDiscountTiersList();
+    public Integer calculateDiscountLevel(double amount) {
+        List<DiscountTier> tiers = getDiscountTiersList();
         if (tiers.isEmpty()) {
             return null;
         }
-        
-        // Сортируем по сумме от большей к меньшей и берём первый подходящий
         return tiers.stream()
                 .filter(t -> t.amount() != null && t.percent() != null)
-                .sorted(Comparator.comparingDouble(PermanentTier::amount).reversed())
-                .filter(t -> totalSpend >= t.amount())
-                .map(PermanentTier::percent)
+                .sorted(Comparator.comparingDouble(DiscountTier::amount).reversed())
+                .filter(t -> amount >= t.amount())
+                .map(DiscountTier::percent)
                 .findFirst()
                 .orElse(null);
     }
     
     /**
-     * Текстовое описание постоянной системы скидок для бота.
+     * Возвращает минимальную сумму для заданного уровня скидки
      */
-    public String getPermanentDiscountDescription() {
-        if (!permanentDiscountEnabled) {
+    public Double getRequiredAmountForDiscount(Integer discountPercent) {
+        List<DiscountTier> tiers = getDiscountTiersList();
+        return tiers.stream()
+                .filter(t -> t.amount() != null && t.percent() != null)
+                .sorted(Comparator.comparingDouble(DiscountTier::amount))
+                .filter(t -> discountPercent != null && t.percent() >= discountPercent)
+                .map(DiscountTier::amount)
+                .findFirst()
+                .orElse(tiers.isEmpty() ? 0.0 : tiers.get(0).amount());
+    }
+    
+    public boolean isDiscountPermanent() {
+        return discountValidityDays != null && discountValidityDays == 0;
+    }
+    
+    /**
+     * Текстовое описание системы скидок для бота.
+     */
+    public String getDiscountTiersDescription() {
+        if (!discountTiersEnabled) {
             return "";
         }
-        List<PermanentTier> tiers = getPermanentDiscountTiersList();
+        List<DiscountTier> tiers = getDiscountTiersList();
         if (tiers.isEmpty()) {
             return "";
         }
         
-        StringBuilder sb = new StringBuilder("💎 Постоянная накопительная скидка:\n\n");
-        sb.append("Скидка НЕ сгорает и начисляется от общей суммы покупок!\n\n");
+        StringBuilder sb = new StringBuilder("💡 Накопительная система скидок:\n\n");
+        if (isDiscountPermanent()) {
+            sb.append("Скидка НЕ сгорает!\n\n");
+        } else {
+            sb.append(String.format("Скидка действует %d дней после достижения уровня.\n\n", discountValidityDays));
+        }
         
         tiers.stream()
                 .filter(t -> t.amount() != null && t.percent() != null)
-                .sorted(Comparator.comparingDouble(PermanentTier::amount))
+                .sorted(Comparator.comparingDouble(DiscountTier::amount))
                 .forEach(t -> sb.append(String.format("• %d%% скидка — от %.0f руб\n", t.percent(), t.amount())));
         
         return sb.toString();
     }
     
     /**
-     * Информация о прогрессе к следующему уровню постоянной скидки.
+     * Информация о прогрессе накопления скидки.
      */
-    public String getPermanentDiscountProgressInfo(double totalSpend) {
-        if (!permanentDiscountEnabled) {
+    public String getDiscountProgressInfo(double accumulatedAmount, Integer currentDiscountLevel, boolean isDiscountValid) {
+        if (!discountTiersEnabled) {
             return "";
         }
-        List<PermanentTier> tiers = getPermanentDiscountTiersList();
-        if (tiers.isEmpty()) {
-            return "";
-        }
-        
-        List<PermanentTier> sorted = tiers.stream()
+        List<DiscountTier> sorted = getDiscountTiersList().stream()
                 .filter(t -> t.amount() != null && t.percent() != null)
-                .sorted(Comparator.comparingDouble(PermanentTier::amount))
+                .sorted(Comparator.comparingDouble(DiscountTier::amount))
                 .toList();
+        if (sorted.isEmpty()) {
+            return "";
+        }
         
-        // Ищем следующий недостигнутый уровень
-        for (PermanentTier tier : sorted) {
-            if (totalSpend < tier.amount()) {
-                double remaining = tier.amount() - totalSpend;
-                return String.format("💎 До постоянной скидки %d%%: %.0f руб.", tier.percent(), remaining);
+        for (DiscountTier tier : sorted) {
+            if (accumulatedAmount < tier.amount()) {
+                return String.format("До скидки %d%%: %.0f руб.", tier.percent(), tier.amount() - accumulatedAmount);
             }
         }
-        
-        // Все уровни достигнуты
-        PermanentTier maxTier = sorted.get(sorted.size() - 1);
-        return String.format("💎 Максимальная постоянная скидка %d%% достигнута! 🎉", maxTier.percent());
+        DiscountTier maxTier = sorted.get(sorted.size() - 1);
+        return String.format("Максимальная скидка %d%% достигнута! 🎉", maxTier.percent());
+    }
+    
+    // Aliases for backward compatibility with code referencing "permanent" methods
+    
+    /** @deprecated Use getDiscountTiersList() */
+    public List<DiscountTier> getPermanentDiscountTiersList() {
+        return getDiscountTiersList();
+    }
+    
+    /** @deprecated Use setDiscountTiersList() */
+    public void setPermanentDiscountTiersList(List<DiscountTier> tiers) {
+        setDiscountTiersList(tiers);
+    }
+    
+    /** @deprecated Use calculateDiscountLevel() */
+    public Integer calculatePermanentDiscountLevel(double totalSpend) {
+        return calculateDiscountLevel(totalSpend);
+    }
+    
+    /** @deprecated Use getDiscountTiersDescription() */
+    public String getPermanentDiscountDescription() {
+        return getDiscountTiersDescription();
+    }
+    
+    /** @deprecated Use getDiscountProgressInfo() */
+    public String getPermanentDiscountProgressInfo(double totalSpend) {
+        return getDiscountProgressInfo(totalSpend, null, false);
     }
 }
 

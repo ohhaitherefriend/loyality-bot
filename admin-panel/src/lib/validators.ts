@@ -112,6 +112,12 @@ export const permanentDiscountSettingsSchema = z.object({
   permanentDiscountTiersList: z.array(permanentDiscountTierSchema).default([]),
 })
 
+export const bonusSettingsSchema = z.object({
+  bonusPointsEnabled: z.boolean(),
+  bonusCashbackPercent: z.number().min(1, 'Минимум 1%').max(50, 'Максимум 50%'),
+  bonusMaxSpendPercent: z.number().min(1, 'Минимум 1%').max(100, 'Максимум 100%'),
+})
+
 export const generalSettingsSchema = z.object({
   shopName: z
     .string()
@@ -165,6 +171,7 @@ export const shopSettingsSchema = z
   .merge(stampsSettingsSchema)
   .merge(discountTiersSettingsSchema)
   .merge(permanentDiscountSettingsSchema)
+  .merge(bonusSettingsSchema)
   .merge(customMessagesSchema)
 
 export type ShopSettingsFormData = z.infer<typeof shopSettingsSchema>

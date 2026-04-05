@@ -162,6 +162,10 @@ export interface UpdateSettingsRequest {
   // Постоянная скидка
   permanentDiscountEnabled?: boolean
   permanentDiscountTiers?: string
+  // Балльная система
+  bonusPointsEnabled?: boolean
+  bonusCashbackPercent?: number
+  bonusMaxSpendPercent?: number
   telegramChannelUrl?: string
   defaultLocationId?: string
   autoMessagesEnabled?: boolean
@@ -260,6 +264,11 @@ export interface ShopSettings {
   vipThresholdPurchases: number
   vipThresholdTotalSpend?: number
   lostDaysSinceLastPurchase: number
+  
+  // Балльная система
+  bonusPointsEnabled: boolean
+  bonusCashbackPercent: number
+  bonusMaxSpendPercent: number
   
   // Авто-сообщения
   autoMessagesEnabled: boolean
