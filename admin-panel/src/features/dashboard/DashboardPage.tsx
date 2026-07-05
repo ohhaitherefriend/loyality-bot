@@ -12,7 +12,6 @@ import {
   Clock,
   AlertTriangle,
   CheckCircle,
-  Users,
   TrendingUp,
   Coffee,
 } from 'lucide-react'
@@ -20,13 +19,13 @@ import {
 import { api } from '@/api/client'
 import { useAuthStore } from '@/lib/auth-store'
 import { useShopStore } from '@/lib/store'
-import { cn } from '@/lib/utils'
 
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ProductTour } from '@/components/ProductTour'
 
 export function DashboardPage() {
   const navigate = useNavigate()
@@ -67,6 +66,7 @@ export function DashboardPage() {
   
   return (
     <div className="space-y-8">
+      <ProductTour />
       {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
@@ -105,13 +105,13 @@ export function DashboardPage() {
             <AlertDescription className="flex items-center justify-between">
               <span>
                 {isTrialing
-                  ? 'Все функции доступны. Оплата в разработке.'
-                  : 'Оплата в разработке. Функционал НЕ ограничен.'
+                  ? 'Все функции доступны в течение пробного периода.'
+                  : 'Бот приостановлен. Оплатите подписку для продолжения работы.'
                 }
               </span>
-              <Button size="sm" variant="outline" asChild>
+              <Button size="sm" variant={isExpired ? 'default' : 'outline'} asChild>
                 <Link to="/billing">
-                  Подробнее
+                  {isExpired ? 'Оплатить' : 'Подробнее'}
                   <ArrowRight className="ml-2 h-4 w-4" />
                 </Link>
               </Button>
@@ -122,7 +122,7 @@ export function DashboardPage() {
       
       {/* Quick Actions */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/status')}>
+        <Card data-tour="bot-status" className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/status')}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">Статус бота</CardTitle>
             <Bot className="h-4 w-4 text-muted-foreground" />
@@ -148,7 +148,7 @@ export function DashboardPage() {
           </CardContent>
         </Card>
         
-        <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/settings')}>
+        <Card data-tour="settings" className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/settings')}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">Настройки</CardTitle>
             <Settings className="h-4 w-4 text-muted-foreground" />
@@ -159,7 +159,7 @@ export function DashboardPage() {
           </CardContent>
         </Card>
         
-        <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/links')}>
+        <Card data-tour="links" className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/links')}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">Ссылки и QR</CardTitle>
             <Link2 className="h-4 w-4 text-muted-foreground" />
@@ -170,7 +170,7 @@ export function DashboardPage() {
           </CardContent>
         </Card>
         
-        <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/reports')}>
+        <Card data-tour="reports" className="hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate('/reports')}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">Отчёты</CardTitle>
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
@@ -184,7 +184,7 @@ export function DashboardPage() {
       
       {/* Subscription Status */}
       <div className="grid gap-4 md:grid-cols-2">
-        <Card>
+        <Card data-tour="subscription">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <CreditCard className="h-5 w-5" />
@@ -210,19 +210,12 @@ export function DashboardPage() {
                   </Badge>
                 </div>
                 
-                {subscription.status === 'TRIALING' && (
+                {(subscription.status === 'TRIALING' || subscription.status === 'ACTIVE') && (
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Осталось дней</span>
                     <span className="font-bold">{daysLeft}</span>
                   </div>
                 )}
-                
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Enforcement</span>
-                  <Badge variant="outline">
-                    {subscription.billingEnforcementMode === 'OFF' ? 'Отключено' : subscription.billingEnforcementMode}
-                  </Badge>
-                </div>
                 
                 <Button variant="outline" className="w-full" asChild>
                   <Link to="/billing">

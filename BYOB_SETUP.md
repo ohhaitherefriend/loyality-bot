@@ -1,4 +1,4 @@
-# BYOB (Bring Your Own Bot) — Multi-tenant Telegram Loyalty Platform
+# BYOB (Bring Your Own Bot) — Мультитенантная платформа Заботик
 
 ## Обзор
 

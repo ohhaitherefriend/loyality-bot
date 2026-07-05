@@ -1,6 +1,6 @@
 spring:
   application:
-    name: loyalty-bot
+    name: zabotik
   
   datasource:
     url: jdbc:h2:mem:loyaltydb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
@@ -53,10 +53,13 @@ security:
 
 # Billing configuration
 billing:
-  # Длина trial периода в днях
   trial-days: ${BILLING_TRIAL_DAYS:7}
-  # Режим enforcement: OFF (не блокирует), WARN (предупреждает), STRICT (блокирует)
-  enforcement-mode: ${BILLING_ENFORCEMENT_MODE:OFF}
+  enforcement-mode: ${BILLING_ENFORCEMENT_MODE:STRICT}
+
+# CloudPayments
+cloudpayments:
+  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:pk_8671a509172fdf03f6e68c7b8a1ab}
+  api-secret: ${CLOUDPAYMENTS_API_SECRET:75698e3a81d1b365264dac03a637d392}
 
 # Telegram Bot Configuration (legacy single-bot mode)
 telegram:
@@ -90,6 +93,12 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+
+# Support Bot (feedback)
+support:
+  bot:
+    token: ${SUPPORT_BOT_TOKEN:}
+    admin-chat-id: ${SUPPORT_ADMIN_CHAT_ID:0}
 
 logging:
   level:

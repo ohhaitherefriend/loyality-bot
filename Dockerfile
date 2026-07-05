@@ -25,7 +25,7 @@ FROM eclipse-temurin:21-jre-jammy
 
 # Метаданные образа
 LABEL maintainer="your-email@example.com"
-LABEL description="Loyalty Bot - Telegram bot for loyalty program"
+LABEL description="Заботик — Telegram-бот программы лояльности"
 LABEL version="1.0.0"
 
 # Создаем непривилегированного пользователя для безопасности

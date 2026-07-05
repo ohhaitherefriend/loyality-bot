@@ -54,3 +54,8 @@ logs/
 *.env
 application-local.yml
 application-local.properties
+
+### TLS certificates / private keys ###
+certs/
+*.key
+*.pem

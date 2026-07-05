@@ -2,7 +2,7 @@
 
 # Скрипт для запуска приложения
 
-echo "🤖 Запуск Loyalty Bot..."
+echo "🤖 Запуск Заботик..."
 
 # Проверка наличия Java
 if ! command -v java &> /dev/null; then

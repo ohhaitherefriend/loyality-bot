@@ -89,6 +89,13 @@ public class Subscription {
     private String externalSubscriptionId;
     
     /**
+     * Бесплатный доступ навсегда (проставляется вручную в БД)
+     */
+    @Column(nullable = false)
+    @Builder.Default
+    private Boolean freeForever = false;
+    
+    /**
      * Уведомление об истечении было отправлено
      */
     @Column(nullable = false)
@@ -160,8 +167,29 @@ public class Subscription {
      * Проверяет, истекла ли подписка
      */
     public boolean isExpired() {
+        if (Boolean.TRUE.equals(freeForever)) {
+            return false;
+        }
         LocalDateTime endDate = getEffectiveEndDate();
         return endDate != null && LocalDateTime.now().isAfter(endDate);
+    }
+    
+    /**
+     * Проверяет, разрешён ли доступ к функционалу.
+     * true если: freeForever, или trial/active и дата не прошла.
+     */
+    public boolean isAccessGranted() {
+        if (Boolean.TRUE.equals(freeForever)) {
+            return true;
+        }
+        if (status == SubscriptionStatus.EXPIRED || status == SubscriptionStatus.CANCELLED) {
+            return false;
+        }
+        LocalDateTime endDate = getEffectiveEndDate();
+        if (endDate == null) {
+            return false;
+        }
+        return !LocalDateTime.now().isAfter(endDate);
     }
     
     /**

@@ -29,6 +29,7 @@ export function RegisterPage() {
   const navigate = useNavigate()
   const { register: registerUser, isLoading, error, clearError } = useAuthStore()
   const [showError, setShowError] = useState(false)
+  const [agreedToTerms, setAgreedToTerms] = useState(false)
 
   const form = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
@@ -152,6 +153,25 @@ export function RegisterPage() {
                   </p>
                 )}
               </div>
+              <div className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  id="terms"
+                  checked={agreedToTerms}
+                  onChange={(e) => setAgreedToTerms(e.target.checked)}
+                  className="mt-1 h-4 w-4 shrink-0 rounded border-input accent-primary"
+                />
+                <label htmlFor="terms" className="text-xs text-muted-foreground leading-relaxed">
+                  Я принимаю условия{' '}
+                  <Link to="/offer" target="_blank" className="text-primary underline underline-offset-2">
+                    оферты
+                  </Link>{' '}
+                  и{' '}
+                  <Link to="/privacy" target="_blank" className="text-primary underline underline-offset-2">
+                    политики конфиденциальности
+                  </Link>
+                </label>
+              </div>
             </CardContent>
             
             <CardFooter className="flex flex-col gap-4">
@@ -159,7 +179,7 @@ export function RegisterPage() {
                 type="submit" 
                 className="w-full" 
                 size="lg"
-                disabled={isLoading}
+                disabled={isLoading || !agreedToTerms}
               >
                 {isLoading ? (
                   <>

@@ -1,6 +1,6 @@
 spring:
   application:
-    name: loyalty-bot
+    name: zabotik
   
   datasource:
     url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/loyalty_db}
@@ -61,6 +61,14 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+
+billing:
+  trial-days: ${BILLING_TRIAL_DAYS:7}
+  enforcement-mode: ${BILLING_ENFORCEMENT_MODE:STRICT}
+
+cloudpayments:
+  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:pk_8671a509172fdf03f6e68c7b8a1ab}
+  api-secret: ${CLOUDPAYMENTS_API_SECRET:75698e3a81d1b365264dac03a637d392}
 
 logging:
   level:

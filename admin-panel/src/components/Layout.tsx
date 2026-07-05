@@ -1,4 +1,5 @@
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
   Bot,
@@ -12,11 +13,15 @@ import {
   CreditCard,
   LogOut,
   User,
+  MessageCircle,
+  AlertTriangle,
+  ArrowRight,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { useShopStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
+import { api } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
 import { BotSwitcher } from '@/components/BotSwitcher'
@@ -43,8 +48,19 @@ export function Layout() {
   const location = useLocation()
   const navigate = useNavigate()
   const { shopId, botUsername, businessName } = useShopStore()
-  const { user, logout } = useAuthStore()
+  const { user, shops, logout } = useAuthStore()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  const currentShopId = shopId || shops[0]?.shopId
+
+  const { data: subscription } = useQuery({
+    queryKey: ['subscription', currentShopId],
+    queryFn: () => currentShopId ? api.getSubscription(currentShopId) : null,
+    enabled: !!currentShopId,
+    staleTime: 30_000,
+  })
+
+  const isBlocked = subscription && !subscription.accessGranted && location.pathname !== '/billing'
 
   const filteredNavItems = navItems.filter(
     (item) => !item.requiresShop || shopId
@@ -84,25 +100,26 @@ export function Layout() {
               {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </Button>
 
-            <Link to="/" className="flex items-center gap-3 group">
+            <Link to="/dashboard" className="flex items-center gap-3 group">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/60 text-primary-foreground shadow-lg shadow-primary/25 transition-transform group-hover:scale-105">
                 <Bot className="h-5 w-5" />
               </div>
               <div className="hidden sm:block">
-                <h1 className="font-semibold tracking-tight">Loyalty Bot</h1>
+                <h1 className="font-semibold tracking-tight">Заботик</h1>
                 <p className="text-xs text-muted-foreground">Админ-панель</p>
               </div>
             </Link>
           </div>
 
           {/* Desktop Navigation */}
-          <nav className="hidden md:flex items-center gap-1">
+          <nav data-tour="navigation" className="hidden md:flex items-center gap-1">
             {filteredNavItems.map((item) => {
               const isActive = location.pathname === item.path
               return (
                 <Link
                   key={item.path}
                   to={item.path}
+                  data-tour={item.path === '/connect' ? 'connect' : undefined}
                   className={cn(
                     'relative flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors',
                     isActive
@@ -126,7 +143,9 @@ export function Layout() {
 
           {/* Right side: Bot Switcher + User Menu */}
           <div className="flex items-center gap-2">
-            <BotSwitcher />
+            <div data-tour="bot-switcher">
+              <BotSwitcher />
+            </div>
             
             {/* User Menu */}
             <DropdownMenu>
@@ -201,22 +220,50 @@ export function Layout() {
 
       {/* Main content */}
       <main className="container px-4 py-8">
-        <motion.div
-          key={location.pathname}
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <Outlet />
-        </motion.div>
+        {isBlocked ? (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="flex flex-col items-center justify-center py-20 text-center"
+          >
+            <div className="rounded-full bg-destructive/10 p-6 mb-6">
+              <AlertTriangle className="h-12 w-12 text-destructive" />
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Подписка истекла</h2>
+            <p className="text-muted-foreground max-w-md mb-6">
+              Бот приостановлен. Оплатите подписку, чтобы продолжить пользоваться сервисом.
+              Все данные ваших клиентов сохранены.
+            </p>
+            <Button size="lg" onClick={() => navigate('/billing')}>
+              <CreditCard className="mr-2 h-5 w-5" />
+              Перейти к оплате
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          </motion.div>
+        ) : (
+          <motion.div
+            key={location.pathname}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <Outlet />
+          </motion.div>
+        )}
       </main>
 
       {/* Footer */}
       <footer className="border-t bg-background/50 backdrop-blur-sm">
-        <div className="container px-4 py-6">
-          <p className="text-center text-sm text-muted-foreground">
-            Loyalty Bot Platform — Управление программой лояльности
+        <div className="container flex items-center justify-between px-4 py-6">
+          <p className="text-sm text-muted-foreground">
+            Заботик — Управление программой лояльности
           </p>
+          <Button variant="ghost" size="sm" asChild>
+            <a href="https://t.me/zabotik_support_bot" target="_blank" rel="noopener noreferrer">
+              <MessageCircle className="mr-2 h-4 w-4" />
+              Поддержка
+            </a>
+          </Button>
         </div>
       </footer>
     </div>

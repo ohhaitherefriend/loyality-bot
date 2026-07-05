@@ -17,7 +17,6 @@ import java.util.Optional;
 
 /**
  * Сервис для управления подписками.
- * Billing enforcement отключен (warn only mode).
  */
 @Service
 @RequiredArgsConstructor
@@ -93,6 +92,54 @@ public class SubscriptionService {
     }
     
     /**
+     * Активирует подписку после реальной оплаты через платёжного провайдера.
+     */
+    @Transactional
+    public Subscription activateByPayment(String shopId, String planCode, String externalId, String providerName) {
+        log.info("Activating paid subscription for shopId={}, planCode={}, provider={}", shopId, planCode, providerName);
+
+        Subscription subscription = subscriptionRepository.findByShopId(shopId)
+                .orElseThrow(() -> new IllegalArgumentException("Subscription not found for shopId=" + shopId));
+
+        Plan plan = planRepository.findByCode(planCode).orElse(null);
+        int periodDays = plan != null ? plan.getPeriodDays() : 30;
+
+        Subscription.PaymentProvider provider;
+        try {
+            provider = Subscription.PaymentProvider.valueOf(providerName);
+        } catch (Exception e) {
+            provider = Subscription.PaymentProvider.CLOUDPAYMENTS;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        subscription.setStatus(Subscription.SubscriptionStatus.ACTIVE);
+        subscription.setPlanCode(planCode);
+        subscription.setProvider(provider);
+        subscription.setCurrentPeriodStartAt(now);
+        subscription.setCurrentPeriodEndAt(now.plusDays(periodDays));
+        subscription.setExternalSubscriptionId(externalId);
+        subscription.setExpirationNotified(false);
+
+        subscription = subscriptionRepository.save(subscription);
+
+        log.info("Paid subscription activated: id={}, shopId={}, periodEndAt={}, provider={}",
+                subscription.getId(), shopId, subscription.getCurrentPeriodEndAt(), provider);
+
+        return subscription;
+    }
+
+    /**
+     * Проверяет, разрешён ли доступ к функционалу для магазина.
+     */
+    public boolean isAccessGranted(String shopId) {
+        Optional<Subscription> subOpt = subscriptionRepository.findByShopId(shopId);
+        if (subOpt.isEmpty()) {
+            return false;
+        }
+        return subOpt.get().isAccessGranted();
+    }
+
+    /**
      * Продлевает trial период (для саппорта)
      */
     @Transactional
@@ -127,37 +174,33 @@ public class SubscriptionService {
      */
     public SubscriptionInfo getSubscriptionInfo(String shopId) {
         Optional<Subscription> subOpt = subscriptionRepository.findByShopId(shopId);
-        
+
         if (subOpt.isEmpty()) {
-            return new SubscriptionInfo(
-                null,
-                "NO_SUBSCRIPTION",
-                0,
-                null,
-                enforcementMode
-            );
+            return new SubscriptionInfo(null, "NO_SUBSCRIPTION", 0, null, false, false);
         }
-        
+
         Subscription sub = subOpt.get();
-        
+
         return new SubscriptionInfo(
-            sub,
-            sub.getStatus().name(),
-            sub.getDaysLeft(),
-            sub.getEffectiveEndDate(),
-            enforcementMode
+                sub,
+                sub.getStatus().name(),
+                sub.getDaysLeft(),
+                sub.getEffectiveEndDate(),
+                Boolean.TRUE.equals(sub.getFreeForever()),
+                sub.isAccessGranted()
         );
     }
-    
+
     /**
      * Информация о подписке для API
      */
     public record SubscriptionInfo(
-        Subscription subscription,
-        String status,
-        long daysLeft,
-        LocalDateTime endsAt,
-        String billingEnforcementMode
+            Subscription subscription,
+            String status,
+            long daysLeft,
+            LocalDateTime endsAt,
+            boolean freeForever,
+            boolean accessGranted
     ) {}
     
     /**
@@ -172,20 +215,22 @@ public class SubscriptionService {
         
         LocalDateTime now = LocalDateTime.now();
         
-        // Проверяем истёкшие trial
+        // Проверяем истёкшие trial (исключая freeForever)
         List<Subscription> expiredTrials = subscriptionRepository.findExpiredTrials(now);
         for (Subscription sub : expiredTrials) {
+            if (Boolean.TRUE.equals(sub.getFreeForever())) continue;
             sub.setStatus(Subscription.SubscriptionStatus.EXPIRED);
             subscriptionRepository.save(sub);
-            log.info("Trial expired for shopId={} (enforcement={})", sub.getShopId(), enforcementMode);
+            log.info("Trial expired for shopId={}", sub.getShopId());
         }
-        
-        // Проверяем истёкшие активные подписки
+
+        // Проверяем истёкшие активные подписки (исключая freeForever)
         List<Subscription> expiredActive = subscriptionRepository.findExpiredActive(now);
         for (Subscription sub : expiredActive) {
+            if (Boolean.TRUE.equals(sub.getFreeForever())) continue;
             sub.setStatus(Subscription.SubscriptionStatus.EXPIRED);
             subscriptionRepository.save(sub);
-            log.info("Subscription expired for shopId={} (enforcement={})", sub.getShopId(), enforcementMode);
+            log.info("Subscription expired for shopId={}", sub.getShopId());
         }
         
         log.info("Expired check complete: {} trials, {} active marked as expired", 

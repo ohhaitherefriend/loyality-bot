@@ -16,6 +16,7 @@ import type {
   MeResponse,
   SubscriptionResponse,
   PlanDto,
+  PaymentConfigResponse,
   OnboardingResponse,
   CreateShopRequest,
   ConnectBotOnboardingRequest,
@@ -137,6 +138,16 @@ class ApiClient {
 
   async getPlans(): Promise<PlanDto[]> {
     return this.request<PlanDto[]>('/api/billing/plans')
+  }
+
+  async getPaymentConfig(shopId: string, planCode: string = 'BASIC_MONTHLY'): Promise<PaymentConfigResponse> {
+    return this.request<PaymentConfigResponse>(`/api/billing/payment-config?shopId=${shopId}&planCode=${planCode}`)
+  }
+
+  async confirmPayment(shopId: string, planCode: string = 'BASIC_MONTHLY'): Promise<SubscriptionResponse> {
+    return this.request<SubscriptionResponse>(`/api/billing/confirm-payment?shopId=${shopId}&planCode=${planCode}`, {
+      method: 'POST',
+    })
   }
 
   // ========== Onboarding Endpoints ==========

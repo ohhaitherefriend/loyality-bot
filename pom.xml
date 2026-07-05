@@ -15,8 +15,8 @@
     <groupId>com.plstk</groupId>
     <artifactId>loyalty-bot</artifactId>
     <version>1.0.0</version>
-    <name>Loyalty Program Telegram Bot</name>
-    <description>Telegram bot for loyalty program</description>
+    <name>Заботик</name>
+    <description>Заботик — Telegram-бот программы лояльности</description>
     
     <properties>
         <java.version>21</java.version>

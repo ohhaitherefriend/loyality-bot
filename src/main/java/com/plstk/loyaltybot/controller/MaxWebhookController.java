@@ -2,9 +2,11 @@ package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.BotInstance;
 import com.plstk.loyaltybot.entity.MessengerPlatform;
-import com.plstk.loyaltybot.service.BotInstanceService;
+import com.plstk.loyaltybot.max.MaxApiClient;
 import com.plstk.loyaltybot.max.MaxContext;
 import com.plstk.loyaltybot.max.MaxUpdateRouter;
+import com.plstk.loyaltybot.service.BotInstanceService;
+import com.plstk.loyaltybot.service.SubscriptionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -26,6 +28,8 @@ public class MaxWebhookController {
 
     private final BotInstanceService botInstanceService;
     private final MaxUpdateRouter updateRouter;
+    private final SubscriptionService subscriptionService;
+    private final MaxApiClient maxApiClient;
 
     @PostMapping("/webhook/{botInstanceId}/{secret}")
     public ResponseEntity<Void> handleWebhook(
@@ -53,6 +57,22 @@ public class MaxWebhookController {
                 return ResponseEntity.ok().build();
             }
 
+            if (!subscriptionService.isAccessGranted(botInstance.getShopId())) {
+                log.info("Subscription expired for shopId={}, blocking Max bot {}", botInstance.getShopId(), botInstanceId);
+                Long userId = extractUserId(update);
+                if (userId != null) {
+                    try {
+                        String token = botInstanceService.getDecryptedToken(botInstance);
+                        maxApiClient.sendMessage(token, userId,
+                                "⏸ Бот временно приостановлен. Владельцу необходимо продлить подписку.",
+                                null, null);
+                    } catch (Exception ex) {
+                        log.debug("Could not send pause message via Max: {}", ex.getMessage());
+                    }
+                }
+                return ResponseEntity.ok().build();
+            }
+
             MaxContext context = botInstanceService.createMaxContext(botInstance, update);
 
             if (context != null) {
@@ -70,5 +90,24 @@ public class MaxWebhookController {
     @GetMapping("/webhook/health")
     public ResponseEntity<String> healthCheck() {
         return ResponseEntity.ok("Max webhook endpoint is ready");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Long extractUserId(Map<String, Object> update) {
+        Map<String, Object> message = (Map<String, Object>) update.get("message");
+        if (message != null) {
+            Map<String, Object> sender = (Map<String, Object>) message.get("sender");
+            if (sender != null && sender.get("user_id") != null) {
+                return ((Number) sender.get("user_id")).longValue();
+            }
+        }
+        Map<String, Object> callback = (Map<String, Object>) update.get("callback");
+        if (callback != null) {
+            Map<String, Object> user = (Map<String, Object>) callback.get("user");
+            if (user != null && user.get("user_id") != null) {
+                return ((Number) user.get("user_id")).longValue();
+            }
+        }
+        return null;
     }
 }

@@ -49,6 +49,8 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> {
                 auth
                     .requestMatchers(new AntPathRequestMatcher("/api/auth/**")).permitAll()
+                    .requestMatchers(new AntPathRequestMatcher("/api/billing/cloudpayments/**")).permitAll()
+                    .requestMatchers(new AntPathRequestMatcher("/api/billing/plans")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/tg/webhook/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/max/webhook/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/health")).permitAll()

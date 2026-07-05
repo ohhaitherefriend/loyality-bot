@@ -42,6 +42,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       SERVER_BASE_URL: ${SERVER_BASE_URL:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      SUPPORT_BOT_TOKEN: ${SUPPORT_BOT_TOKEN:-}
+      SUPPORT_ADMIN_CHAT_ID: ${SUPPORT_ADMIN_CHAT_ID:-0}
     ports:
       - "8080:8080"
     depends_on:

@@ -2,6 +2,8 @@ package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.BotInstance;
 import com.plstk.loyaltybot.service.BotInstanceService;
+import com.plstk.loyaltybot.service.SubscriptionService;
+import com.plstk.loyaltybot.telegram.TelegramApiClient;
 import com.plstk.loyaltybot.telegram.TelegramContext;
 import com.plstk.loyaltybot.telegram.TelegramUpdateRouter;
 import lombok.RequiredArgsConstructor;
@@ -28,6 +30,8 @@ public class TelegramWebhookController {
     
     private final BotInstanceService botInstanceService;
     private final TelegramUpdateRouter updateRouter;
+    private final SubscriptionService subscriptionService;
+    private final TelegramApiClient telegramApiClient;
     
     /**
      * Основной endpoint для приёма Telegram Updates через webhook.
@@ -54,14 +58,31 @@ public class TelegramWebhookController {
             }
             
             BotInstance botInstance = botOpt.get();
-            
+
             // 2. Проверяем что бот активен
             if (!botInstance.getIsActive() || botInstance.getStatus() != BotInstance.BotStatus.ACTIVE) {
                 log.warn("Bot {} is not active, ignoring update", botInstanceId);
                 return ResponseEntity.ok().build();
             }
-            
-            // 3. Создаём контекст и передаём на обработку
+
+            // 3. Проверяем подписку магазина
+            if (!subscriptionService.isAccessGranted(botInstance.getShopId())) {
+                log.info("Subscription expired for shopId={}, blocking bot {}", botInstance.getShopId(), botInstanceId);
+                Long chatId = extractChatId(update);
+                if (chatId != null) {
+                    try {
+                        String token = botInstanceService.getDecryptedToken(botInstance);
+                        telegramApiClient.sendMessage(token, chatId,
+                                "⏸ Бот временно приостановлен. Владельцу необходимо продлить подписку.",
+                                null, null);
+                    } catch (Exception ex) {
+                        log.debug("Could not send pause message: {}", ex.getMessage());
+                    }
+                }
+                return ResponseEntity.ok().build();
+            }
+
+            // 4. Создаём контекст и передаём на обработку
             TelegramContext context = botInstanceService.createContext(botInstance, update);
             
             if (context != null) {
@@ -88,9 +109,12 @@ public class TelegramWebhookController {
         return ResponseEntity.ok("Webhook endpoint is ready");
     }
     
-    /**
-     * Webhook status (requires authentication, available via /api/bots/{id}).
-     * Removed from public /tg/ namespace for security.
-     */
+    private Long extractChatId(Update update) {
+        if (update.hasMessage()) return update.getMessage().getChatId();
+        if (update.hasCallbackQuery()) return update.getCallbackQuery().getMessage().getChatId();
+        if (update.hasEditedMessage()) return update.getEditedMessage().getChatId();
+        if (update.hasMyChatMember()) return update.getMyChatMember().getChat().getId();
+        return null;
+    }
 }
 

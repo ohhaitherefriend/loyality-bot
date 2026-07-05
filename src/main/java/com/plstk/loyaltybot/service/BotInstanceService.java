@@ -281,6 +281,13 @@ public class BotInstanceService {
     }
     
     /**
+     * Расшифровывает токен бота для внешнего использования.
+     */
+    public String getDecryptedToken(BotInstance botInstance) {
+        return tokenEncryptionService.decrypt(botInstance.getBotToken());
+    }
+
+    /**
      * Создаёт TelegramContext для обработки Update
      */
     public TelegramContext createContext(BotInstance botInstance, Update update) {

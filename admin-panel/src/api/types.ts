@@ -74,7 +74,19 @@ export interface SubscriptionResponse {
   trialEndAt?: string
   currentPeriodStartAt?: string
   currentPeriodEndAt?: string
-  billingEnforcementMode: string
+  freeForever: boolean
+  accessGranted: boolean
+}
+
+export interface PaymentConfigResponse {
+  publicId: string
+  amount: number
+  currency: string
+  invoiceId: string
+  description: string
+  accountId: string
+  recurrentInterval: string
+  recurrentPeriod: number
 }
 
 export interface PlanDto {
