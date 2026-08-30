@@ -1,16 +1,13 @@
 version: '3.8'
 
 services:
-  # ========================================
-  # PostgreSQL Database
-  # ========================================
   postgres:
     image: postgres:15-alpine
     container_name: loyalty-db
     environment:
       POSTGRES_DB: loyalty_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
     expose:
       - "5432"
     volumes:
@@ -24,9 +21,22 @@ services:
       timeout: 5s
       retries: 5
 
-  # ========================================
-  # Backend (Spring Boot)
-  # ========================================
+  rembg-service:
+    build:
+      context: ./tools/rembg-service
+    container_name: loyalty-rembg
+    expose:
+      - "7000"
+    networks:
+      - loyalty-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:7000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
   backend:
     image: ohhaithere/loyalty-backend:latest
     container_name: loyalty-backend
@@ -34,21 +44,37 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       DATABASE_URL: jdbc:postgresql://postgres:5432/loyalty_db
       DATABASE_USERNAME: postgres
-      DATABASE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME}
-      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:?ADMIN_SECRET_CODE is required}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      DATABASE_PASSWORD: ${DB_PASSWORD:-password}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      ADMIN_SECRET_CODE: ${ADMIN_SECRET_CODE:-plstkwrld}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-}
       SERVER_BASE_URL: ${SERVER_BASE_URL:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       SUPPORT_BOT_TOKEN: ${SUPPORT_BOT_TOKEN:-}
       SUPPORT_ADMIN_CHAT_ID: ${SUPPORT_ADMIN_CHAT_ID:-0}
+      COMMERCE_IMAGE_SEARCH_ENABLED: ${COMMERCE_IMAGE_SEARCH_ENABLED:-false}
+      COMMERCE_IMAGE_SEARCH_PROVIDER: ${COMMERCE_IMAGE_SEARCH_PROVIDER:-disabled}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+      COMMERCE_IMAGE_RANKER: ${COMMERCE_IMAGE_RANKER:-rule-based}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      COMMERCE_BACKGROUND_REMOVAL_PROVIDER: ${COMMERCE_BACKGROUND_REMOVAL_PROVIDER:-disabled}
+      REMBG_URL: ${REMBG_URL:-http://rembg-service:7000/remove}
+      REMBG_HEALTH_URL: ${REMBG_HEALTH_URL:-http://rembg-service:7000/health}
+      COMMERCE_MINI_APP_ENABLED: ${COMMERCE_MINI_APP_ENABLED:-true}
+      COMMERCE_MINI_APP_PUBLIC_URL: ${COMMERCE_MINI_APP_PUBLIC_URL:-}
+      COMMERCE_MINI_APP_REQUIRE_TELEGRAM_AUTH: ${COMMERCE_MINI_APP_REQUIRE_TELEGRAM_AUTH:-true}
+      COMMERCE_MINI_APP_INIT_DATA_MAX_AGE_SECONDS: ${COMMERCE_MINI_APP_INIT_DATA_MAX_AGE_SECONDS:-86400}
     ports:
       - "8080:8080"
+    volumes:
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
+      rembg-service:
+        condition: service_started
     networks:
       - loyalty-network
     restart: unless-stopped
@@ -57,11 +83,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 90s
 
-  # ========================================
-  # Frontend (React + Nginx)
-  # ========================================
   frontend:
     image: ohhaithere/loyalty-frontend:latest
     container_name: loyalty-frontend

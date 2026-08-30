@@ -22,6 +22,20 @@ import type {
   ConnectBotOnboardingRequest,
   ApplyTemplateRequest,
   CompleteOnboardingRequest,
+  OrderDetails,
+  OrderPageResponse,
+  OrderStatus,
+  OrderStatusUpdateRequest,
+  Product,
+  ProductImage,
+  ProductImportResponse,
+  ProductListParams,
+  ProductPageResponse,
+  ProductUpdateRequest,
+  CatalogImportParams,
+  BulkImageSearchRequest,
+  BulkImageSearchResponse,
+  ImageSearchStatus,
 } from './types'
 
 // ========== Configuration ==========
@@ -90,6 +104,46 @@ class ApiClient {
     }
 
     // Handle empty responses
+    const text = await response.text()
+    if (!text) {
+      return undefined as T
+    }
+
+    return JSON.parse(text) as T
+  }
+
+  private async uploadRequest<T>(endpoint: string, formData: FormData): Promise<T> {
+    const url = `${this.baseUrl}${endpoint}`
+    const headers: HeadersInit = {}
+
+    if (authToken) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${authToken}`
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: formData,
+      credentials: 'include',
+    })
+
+    if (response.status === 401) {
+      authToken = null
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+      throw new ApiClientError('Unauthorized', 401)
+    }
+
+    if (!response.ok) {
+      let errorMessage = `HTTP ${response.status}`
+      try {
+        const errorData = await response.json()
+        errorMessage = errorData.message || errorData.error || errorMessage
+      } catch {
+        // Ignore JSON parse errors
+      }
+      throw new ApiClientError(errorMessage, response.status)
+    }
+
     const text = await response.text()
     if (!text) {
       return undefined as T
@@ -261,6 +315,166 @@ class ApiClient {
 
   async getMonthlyReport(shopId: string): Promise<WeeklyReport> {
     return this.request<WeeklyReport>(`/api/shops/${shopId}/reports/monthly`)
+  }
+
+  // ========== Commerce Orders ==========
+
+  async listOrders(
+    shopId: string,
+    params?: { status?: OrderStatus; page?: number; size?: number }
+  ): Promise<OrderPageResponse> {
+    const search = new URLSearchParams()
+    if (params?.status) search.set('status', params.status)
+    if (params?.page != null) search.set('page', String(params.page))
+    if (params?.size != null) search.set('size', String(params.size))
+    const query = search.toString()
+    return this.request<OrderPageResponse>(
+      `/api/shops/${shopId}/orders${query ? `?${query}` : ''}`
+    )
+  }
+
+  async getOrder(shopId: string, orderId: number): Promise<OrderDetails> {
+    return this.request<OrderDetails>(`/api/shops/${shopId}/orders/${orderId}`)
+  }
+
+  async updateOrderStatus(
+    shopId: string,
+    orderId: number,
+    request: OrderStatusUpdateRequest
+  ): Promise<OrderDetails> {
+    return this.request<OrderDetails>(`/api/shops/${shopId}/orders/${orderId}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify(request),
+    })
+  }
+
+  // ========== Commerce Catalog ==========
+
+  async listProducts(shopId: string, params?: ProductListParams): Promise<ProductPageResponse> {
+    const search = new URLSearchParams()
+    if (params?.page != null) search.set('page', String(params.page))
+    if (params?.size != null) search.set('size', String(params.size))
+    if (params?.query) search.set('query', params.query)
+    if (params?.brand) search.set('brand', params.brand)
+    if (params?.visible != null) search.set('visible', String(params.visible))
+    if (params?.active != null) search.set('active', String(params.active))
+    if (params?.missingImages != null) search.set('missingImages', String(params.missingImages))
+    const query = search.toString()
+    return this.request<ProductPageResponse>(
+      `/api/shops/${shopId}/products${query ? `?${query}` : ''}`
+    )
+  }
+
+  async getProduct(shopId: string, productId: number): Promise<Product> {
+    return this.request<Product>(`/api/shops/${shopId}/products/${productId}`)
+  }
+
+  async updateProduct(
+    shopId: string,
+    productId: number,
+    request: ProductUpdateRequest
+  ): Promise<Product> {
+    return this.request<Product>(`/api/shops/${shopId}/products/${productId}`, {
+      method: 'PUT',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async listBrands(shopId: string): Promise<string[]> {
+    return this.request<string[]>(`/api/shops/${shopId}/products/brands`)
+  }
+
+  async importCatalog(shopId: string, params: CatalogImportParams): Promise<ProductImportResponse> {
+    const formData = new FormData()
+    formData.append('file', params.file)
+    if (params.defaultMarkupPercent != null) {
+      formData.append('defaultMarkupPercent', String(params.defaultMarkupPercent))
+    }
+    formData.append('makeImportedVisible', String(params.makeImportedVisible ?? false))
+    formData.append('overwriteManualFields', String(params.overwriteManualFields ?? false))
+    return this.uploadRequest<ProductImportResponse>(`/api/shops/${shopId}/catalog/import`, formData)
+  }
+
+  async listProductImages(shopId: string, productId: number): Promise<ProductImage[]> {
+    return this.request<ProductImage[]>(`/api/shops/${shopId}/products/${productId}/images`)
+  }
+
+  async uploadProductImage(
+    shopId: string,
+    productId: number,
+    file: File
+  ): Promise<ProductImage> {
+    const formData = new FormData()
+    formData.append('file', file)
+    return this.uploadRequest<ProductImage>(
+      `/api/shops/${shopId}/products/${productId}/images/upload`,
+      formData
+    )
+  }
+
+  async importProductImageFromUrl(
+    shopId: string,
+    productId: number,
+    url: string
+  ): Promise<ProductImage> {
+    return this.request<ProductImage>(`/api/shops/${shopId}/products/${productId}/images/from-url`, {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    })
+  }
+
+  async normalizeProductImage(
+    shopId: string,
+    productId: number,
+    imageId: number
+  ): Promise<ProductImage> {
+    return this.request<ProductImage>(
+      `/api/shops/${shopId}/products/${productId}/images/${imageId}/normalize`,
+      { method: 'POST' }
+    )
+  }
+
+  async approveProductImage(
+    shopId: string,
+    productId: number,
+    imageId: number
+  ): Promise<ProductImage> {
+    return this.request<ProductImage>(
+      `/api/shops/${shopId}/products/${productId}/images/${imageId}/approve`,
+      { method: 'POST' }
+    )
+  }
+
+  async rejectProductImage(
+    shopId: string,
+    productId: number,
+    imageId: number,
+    reason?: string
+  ): Promise<ProductImage> {
+    return this.request<ProductImage>(
+      `/api/shops/${shopId}/products/${productId}/images/${imageId}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ reason: reason ?? null }),
+      }
+    )
+  }
+
+  async getImageSearchStatus(shopId: string): Promise<ImageSearchStatus> {
+    return this.request<ImageSearchStatus>(`/api/shops/${shopId}/products/images/search-status`)
+  }
+
+  async searchImagesBulk(
+    shopId: string,
+    request: BulkImageSearchRequest
+  ): Promise<BulkImageSearchResponse> {
+    return this.request<BulkImageSearchResponse>(
+      `/api/shops/${shopId}/products/images/search-bulk`,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      }
+    )
   }
 }
 

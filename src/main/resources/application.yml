@@ -104,3 +104,42 @@ logging:
   level:
     com.plstk: INFO
     org.telegram: INFO
+
+# Commerce MVP
+commerce:
+  import:
+    default-markup-percent: 35
+  image-search:
+    enabled: ${COMMERCE_IMAGE_SEARCH_ENABLED:false}
+    provider: ${COMMERCE_IMAGE_SEARCH_PROVIDER:disabled}
+    max-results-per-query: ${COMMERCE_IMAGE_SEARCH_MAX_RESULTS:10}
+    min-confidence-to-download: ${COMMERCE_IMAGE_SEARCH_MIN_CONFIDENCE:50}
+    max-products-per-batch: ${COMMERCE_IMAGE_SEARCH_MAX_PRODUCTS_PER_BATCH:50}
+    request-timeout-ms: ${COMMERCE_IMAGE_SEARCH_TIMEOUT_MS:10000}
+    rate-limit-ms: ${COMMERCE_IMAGE_SEARCH_RATE_LIMIT_MS:500}
+    brave:
+      api-key: ${BRAVE_SEARCH_API_KEY:}
+  image-ranker:
+    provider: ${COMMERCE_IMAGE_RANKER:rule-based}
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:}
+      model: ${DEEPSEEK_MODEL:deepseek-chat}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      timeout-ms: ${DEEPSEEK_TIMEOUT_MS:15000}
+  image-normalization:
+    output-size: ${COMMERCE_IMAGE_OUTPUT_SIZE:1024}
+    background: "#FFFFFF"
+    background-removal:
+      provider: ${COMMERCE_BACKGROUND_REMOVAL_PROVIDER:disabled}
+      timeout-ms: ${COMMERCE_BACKGROUND_REMOVAL_TIMEOUT_MS:30000}
+      rembg:
+        url: ${REMBG_URL:http://localhost:7000/remove}
+        health-url: ${REMBG_HEALTH_URL:http://localhost:7000/health}
+  image-storage:
+    base-path: ./data/product-images
+    public-url-prefix: /files/product-images
+  mini-app:
+    enabled: ${COMMERCE_MINI_APP_ENABLED:true}
+    public-url: ${COMMERCE_MINI_APP_PUBLIC_URL:http://localhost:3000}
+    require-telegram-auth: ${COMMERCE_MINI_APP_REQUIRE_TELEGRAM_AUTH:true}
+    init-data-max-age-seconds: ${COMMERCE_MINI_APP_INIT_DATA_MAX_AGE_SECONDS:86400}

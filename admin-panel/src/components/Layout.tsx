@@ -7,6 +7,8 @@ import {
   Settings,
   Activity,
   BarChart3,
+  ShoppingBag,
+  Package,
   Menu,
   X,
   LayoutDashboard,
@@ -41,6 +43,8 @@ const navItems = [
   { path: '/links', label: 'Ссылки и QR', icon: Link2, requiresShop: true },
   { path: '/status', label: 'Статус', icon: Activity, requiresShop: true },
   { path: '/reports', label: 'Отчёты', icon: BarChart3, requiresShop: true },
+  { path: '/catalog', label: 'Каталог', icon: Package, requiresShop: true },
+  { path: '/orders', label: 'Заказы', icon: ShoppingBag, requiresShop: true },
   { path: '/billing', label: 'Биллинг', icon: CreditCard, requiresShop: false },
 ]
 
@@ -63,7 +67,7 @@ export function Layout() {
   const isBlocked = subscription && !subscription.accessGranted && location.pathname !== '/billing'
 
   const filteredNavItems = navItems.filter(
-    (item) => !item.requiresShop || shopId
+    (item) => !item.requiresShop || currentShopId
   )
 
   const handleLogout = () => {

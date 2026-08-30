@@ -2,8 +2,11 @@ package com.plstk.loyaltybot.telegram;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
@@ -180,6 +183,98 @@ public class TelegramApiClient {
         }
     }
     
+    /**
+     * Отправляет фото по URL
+     */
+    public MessageResult sendPhoto(String botToken, Long chatId, String photoUrl, String caption,
+                                   Object replyMarkup, String parseMode) {
+        try {
+            var paramsBuilder = new java.util.HashMap<String, Object>();
+            paramsBuilder.put("chat_id", chatId);
+            paramsBuilder.put("photo", photoUrl);
+
+            if (caption != null) {
+                paramsBuilder.put("caption", caption);
+            }
+            if (parseMode != null) {
+                paramsBuilder.put("parse_mode", parseMode);
+            }
+            if (replyMarkup != null) {
+                paramsBuilder.put("reply_markup", replyMarkup);
+            }
+
+            Map<String, Object> response = callApi(botToken, "sendPhoto", paramsBuilder);
+
+            if (response != null && Boolean.TRUE.equals(response.get("ok"))) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> result = (Map<String, Object>) response.get("result");
+                return new MessageResult(
+                        true,
+                        ((Number) result.get("message_id")).intValue(),
+                        null
+                );
+            }
+
+            String errorDescription = response != null ? (String) response.get("description") : "Unknown error";
+            return new MessageResult(false, null, errorDescription);
+        } catch (RestClientException e) {
+            log.error("Error sending photo to chatId={}", chatId, e);
+            return new MessageResult(false, null, e.getMessage());
+        }
+    }
+
+    /**
+     * Отправляет фото как multipart upload (Telegram не всегда может скачать URL с self-hosted серверов).
+     */
+    public MessageResult sendPhotoBytes(String botToken, Long chatId, byte[] photoBytes, String filename,
+                                        String caption, Object replyMarkup, String parseMode) {
+        try {
+            String url = String.format(TELEGRAM_API_URL, botToken, "sendPhoto");
+
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("chat_id", chatId);
+            body.add("photo", new ByteArrayResource(photoBytes) {
+                @Override
+                public String getFilename() {
+                    return filename != null ? filename : "photo.jpg";
+                }
+            });
+
+            if (caption != null) {
+                body.add("caption", caption);
+            }
+            if (parseMode != null) {
+                body.add("parse_mode", parseMode);
+            }
+            if (replyMarkup != null) {
+                body.add("reply_markup", replyMarkup);
+            }
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+            HttpEntity<MultiValueMap<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.POST, entity, Map.class);
+            Map<String, Object> responseBody = response.getBody();
+
+            if (responseBody != null && Boolean.TRUE.equals(responseBody.get("ok"))) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> result = (Map<String, Object>) responseBody.get("result");
+                return new MessageResult(
+                        true,
+                        ((Number) result.get("message_id")).intValue(),
+                        null
+                );
+            }
+
+            String errorDescription = responseBody != null ? (String) responseBody.get("description") : "Unknown error";
+            return new MessageResult(false, null, errorDescription);
+        } catch (RestClientException e) {
+            log.error("Error uploading photo to chatId={}", chatId, e);
+            return new MessageResult(false, null, e.getMessage());
+        }
+    }
+
     /**
      * Редактирует сообщение
      */

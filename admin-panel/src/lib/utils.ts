@@ -59,7 +59,6 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     await navigator.clipboard.writeText(text)
     return true
   } catch {
-    // Fallback for older browsers
     const textarea = document.createElement('textarea')
     textarea.value = text
     textarea.style.position = 'fixed'
@@ -75,6 +74,27 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       document.body.removeChild(textarea)
     }
   }
+}
+
+const DEV_BACKEND_ORIGIN = 'http://127.0.0.1:8080'
+
+export function resolveImageUrl(url?: string | null): string | null {
+  if (!url) return null
+  if (url.startsWith('http://') || url.startsWith('https://')) return url
+
+  // In dev, serve static product images directly from Spring Boot.
+  // Vite proxy for /files only works on localhost:3000, not 127.0.0.1:3000.
+  const base = import.meta.env.VITE_API_BASE_URL
+    || (import.meta.env.DEV ? DEV_BACKEND_ORIGIN : '')
+
+  return `${base}${url.startsWith('/') ? url : `/${url}`}`
+}
+
+export function resolveProductImageUrl(product: {
+  mainImageUrl?: string | null
+  previewImageUrl?: string | null
+}): string | null {
+  return resolveImageUrl(product.mainImageUrl || product.previewImageUrl)
 }
 
 export function generateQRPayload(botUsername: string, shopId: string, locationId?: string, platform?: string): string {

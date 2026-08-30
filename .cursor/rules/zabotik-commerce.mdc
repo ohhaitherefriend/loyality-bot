@@ -1,0 +1,169 @@
+---
+
+description: Zabotik commerce MVP rules for catalog, orders, Telegram bot, image search and admin panel
+globs:
+
+* "src/main/java/**/*.java"
+* "src/main/resources/db/migration/*.sql"
+* "admin-panel/src/**/*"
+* "pom.xml"
+* "docs/**/*.md"
+  alwaysApply: true
+
+---
+
+# Zabotik commerce MVP rules
+
+You are working in the existing `loyalty-bot` project.
+
+The goal is to add a fast Telegram commerce MVP for cosmetics and perfume sales on top of the existing loyalty system.
+
+Do not rewrite the project from scratch.
+
+## Existing project context
+
+Backend:
+
+* Spring Boot 3.1.5.
+* Java 21.
+* JPA/Hibernate.
+* Flyway migrations in `src/main/resources/db/migration`.
+* Main package: `com.plstk.loyaltybot`.
+* Existing multi-tenant model uses `shopId`.
+* Existing entities include:
+
+  * `User`
+  * `Shop`
+  * `ShopSettings`
+  * `BotInstance`
+  * `Transaction`
+* Existing services include:
+
+  * `LoyaltyBotService`
+  * `TelegramApiClient`
+  * `BonusService`
+  * `UserService`
+  * `ShopSettingsService`
+* Existing admin API is in `AdminApiController`.
+* Telegram user flow is mostly in `LoyaltyBotService`.
+* Telegram sending is through `TelegramApiClient`.
+
+Frontend:
+
+* React + Vite + TypeScript.
+* Admin panel lives in `admin-panel/src`.
+* Routes are in `admin-panel/src/App.tsx`.
+* API client is in `admin-panel/src/api/client.ts`.
+* Types are in `admin-panel/src/api/types.ts`.
+* Layout/navigation is in `admin-panel/src/components/Layout.tsx`.
+
+## Product direction
+
+Build a bot-first Telegram shop, not a full marketplace and not a Telegram Mini App.
+
+MVP must include:
+
+* XLSX price import.
+* Product catalog.
+* Manual product publish/hide.
+* Manual sale price.
+* Product image search and normalization pipeline.
+* Cart.
+* Order creation.
+* Admin order management.
+* Bonus accrual after order completion.
+* Telegram catalog and cart.
+
+Do not implement in MVP:
+
+* Payment provider integration.
+* Online fiscal receipts.
+* Delivery provider integration.
+* Telegram Mini App.
+* Full stock synchronization with supplier.
+* Marketplace logic.
+* AI recommendations.
+* 1C integration.
+
+## Critical constraints
+
+1. Every backend operation must be scoped by `shopId`.
+2. Never show or modify another shop's data.
+3. Use `BigDecimal` for all new money fields.
+4. Do not use `double` for new prices, totals, margins or order amounts.
+5. Do not break existing loyalty flows.
+6. Do not delete existing endpoints or entities.
+7. Do not store secrets in frontend.
+8. Do not hardcode API keys.
+9. New external providers must be optional via config.
+10. App must start even if image search and AI providers are disabled.
+11. Do not auto-publish all imported products.
+12. Imported products must be hidden by default.
+13. Telegram callback data must stay below Telegram's callback data limit.
+14. Do not put long product names, JSON or brand names into callback data.
+15. If Telegram photo sending fails, fallback to text message.
+16. Do not auto-approve product images in MVP.
+17. AI must not generate branded product packaging from scratch.
+18. AI can only normalize real source images: white background, crop, center, quality improvement.
+19. If a product image is missing, the product can still be sold as text-only.
+20. All frontend builds and backend builds must pass before considering the task complete.
+
+## Development workflow
+
+For every major implementation step:
+
+1. Inspect existing patterns first.
+2. Make a short implementation plan.
+3. Implement the smallest coherent vertical slice.
+4. Run backend build/test.
+5. Run frontend build if frontend changed.
+6. Fix compile errors.
+7. Summarize changed files and how to test manually.
+
+Prefer small, safe changes over huge rewrites.
+
+If a class becomes too large, add a new service and delegate instead of stuffing everything into `LoyaltyBotService`.
+
+## Price file
+
+The supplier price file should be placed at:
+
+`imports/price-25-06.xlsx`
+
+It has two sheets:
+
+* `Косметика и уход`
+* `Парфюмерия`
+
+Important structure:
+
+* Actual headers are on row 6.
+* Product data starts after row 6.
+* Columns:
+
+  * A: `GUID`
+  * D: `Бренд`
+  * E: `Артикул`
+  * F: `Штрихкод`
+  * G: `Номенклатура`
+  * H: `Цена`
+  * J: `Заказ`
+  * K: `Сумма`
+* Row 4 contains price date text like: `Цены указаны на: 25.06.2026`.
+* Category rows exist and should not be imported as products.
+* Product row rule:
+
+  * brand is not blank;
+  * supplier article is not blank;
+  * product name is not blank;
+  * supplier price is numeric.
+* Barcode must be stored as string.
+* Do not use column `Заказ` as stock by default.
+* There are no photos and no reliable stock quantities in the price file.
+
+Imported products should be hidden by default:
+
+* `visible=false`
+* `active=true`
+* `availabilityMode=PREORDER`
+* `stockQuantity=null`

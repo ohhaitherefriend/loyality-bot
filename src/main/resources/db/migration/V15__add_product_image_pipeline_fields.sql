@@ -1,0 +1,10 @@
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS visual_quality_score INTEGER;
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS quality_decision VARCHAR(64);
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS quality_warnings TEXT;
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS normalization_provider VARCHAR(64);
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS background_removed BOOLEAN DEFAULT FALSE;
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS scale_normalized BOOLEAN DEFAULT FALSE;
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS angle_normalized BOOLEAN DEFAULT FALSE;
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS manual_review_reason VARCHAR(512);
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS ranker_reason VARCHAR(512);
+ALTER TABLE product_images ADD COLUMN IF NOT EXISTS ranker_warnings TEXT;

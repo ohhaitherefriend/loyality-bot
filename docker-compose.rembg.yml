@@ -1,0 +1,7 @@
+services:
+  rembg-service:
+    build:
+      context: ./tools/rembg-service
+    ports:
+      - "7001:7000"
+    restart: unless-stopped

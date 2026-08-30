@@ -70,6 +70,13 @@ cloudpayments:
   public-id: ${CLOUDPAYMENTS_PUBLIC_ID:pk_8671a509172fdf03f6e68c7b8a1ab}
   api-secret: ${CLOUDPAYMENTS_API_SECRET:75698e3a81d1b365264dac03a637d392}
 
+commerce:
+  mini-app:
+    enabled: ${COMMERCE_MINI_APP_ENABLED:true}
+    public-url: ${COMMERCE_MINI_APP_PUBLIC_URL:}
+    require-telegram-auth: ${COMMERCE_MINI_APP_REQUIRE_TELEGRAM_AUTH:true}
+    init-data-max-age-seconds: ${COMMERCE_MINI_APP_INIT_DATA_MAX_AGE_SECONDS:86400}
+
 logging:
   level:
     com.plstk: INFO

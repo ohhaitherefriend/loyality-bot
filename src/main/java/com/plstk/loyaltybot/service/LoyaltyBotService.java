@@ -1,6 +1,8 @@
 package com.plstk.loyaltybot.service;
 
+import com.plstk.loyaltybot.config.CommerceProperties;
 import com.plstk.loyaltybot.entity.*;
+import com.plstk.loyaltybot.service.commerce.CommerceBotService;
 import com.plstk.loyaltybot.telegram.TelegramApiClient;
 import com.plstk.loyaltybot.telegram.TelegramContext;
 import lombok.RequiredArgsConstructor;
@@ -41,6 +43,8 @@ public class LoyaltyBotService {
     private final WeeklyReportService weeklyReportService;
     private final ClientMemoryService clientMemoryService;
     private final BonusService bonusService;
+    private final CommerceBotService commerceBotService;
+    private final CommerceProperties commerceProperties;
     
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
     
@@ -55,6 +59,8 @@ public class LoyaltyBotService {
     private static final String BTN_DISCOUNTS = "🎁 Мои скидки";
     private static final String BTN_STAMPS = "☕ Мои штампы";
     private static final String BTN_ACHIEVEMENTS = "🏆 Достижения";
+    private static final String BTN_OPEN_SHOP = "🛍 Открыть магазин";
+    private static final String BTN_CATALOG = "🛒 Каталог в боте";
     
     // Кнопки для админа
     private static final String BTN_ENTER_CODE = "🔑 Ввести код покупки";
@@ -104,7 +110,9 @@ public class LoyaltyBotService {
         User user = userOpt.get();
         
         try {
-            if (data.startsWith(CB_FAST_CHECKOUT)) {
+            if (commerceBotService.isCommerceCallback(data)) {
+                commerceBotService.handleCallback(ctx, callbackQuery, user);
+            } else if (data.startsWith(CB_FAST_CHECKOUT)) {
                 handleFastCheckoutCallback(ctx, data, user, messageId);
             } else if (data.startsWith(CB_AMOUNT_CHECKOUT)) {
                 handleAmountCheckoutCallback(ctx, data, user, messageId);
@@ -120,7 +128,7 @@ public class LoyaltyBotService {
             
         } catch (Exception e) {
             log.error("Error handling callback query: {}", data, e);
-            sendMessage(ctx, chatId, "❌ Ошибка: " + e.getMessage(), null);
+            sendMessage(ctx, chatId, "❌ " + e.getMessage(), getUserKeyboard(user, ctx.getShopId()));
         }
     }
     
@@ -163,6 +171,21 @@ public class LoyaltyBotService {
             handlePurchaseAmountInput(ctx, messageText, user);
             return;
         }
+
+        if (user.getState() == User.UserState.AWAITING_ORDER_ADDRESS) {
+            if (commerceBotService.handleMessage(ctx, user, messageText)) {
+                return;
+            }
+        }
+
+        if (messageText != null && (BTN_OPEN_SHOP.equals(messageText) || "/shop".equals(messageText))) {
+            handleOpenShopButton(ctx, user);
+            return;
+        }
+
+        if (commerceBotService.handleMessage(ctx, user, messageText)) {
+            return;
+        }
         
         // Обработка кнопок меню
         if (messageText != null) {
@@ -198,6 +221,7 @@ public class LoyaltyBotService {
         
         if (userOpt.isPresent()) {
             User user = userOpt.get();
+            commerceBotService.resetCheckoutState(ctx.getShopId(), chatId, user);
             
             // Обработка deep-link для покупки
             if (deepLinkParam != null && deepLinkParam.startsWith("buy_")) {
@@ -724,6 +748,33 @@ public class LoyaltyBotService {
         }
     }
     
+    private void handleOpenShopButton(TelegramContext ctx, User user) {
+        Long chatId = ctx.getChatId();
+        String shopId = ctx.getShopId();
+
+        if (!commerceProperties.getMiniApp().isEnabled()) {
+            sendMessage(ctx, chatId, "Магазин временно недоступен.", getUserKeyboard(user, shopId));
+            return;
+        }
+
+        String baseUrl = commerceProperties.getMiniApp().getPublicUrl();
+        if (baseUrl.endsWith("/")) {
+            baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+        }
+        String webAppUrl = baseUrl + "/store/" + shopId;
+
+        Map<String, Object> keyboard = Map.of(
+                "inline_keyboard", List.of(
+                        List.of(Map.of(
+                                "text", "🛍 Открыть магазин",
+                                "web_app", Map.of("url", webAppUrl)
+                        ))
+                )
+        );
+
+        sendMessage(ctx, chatId, "Нажмите кнопку ниже, чтобы открыть магазин:", keyboard);
+    }
+
     // ========== Keyboards ==========
     
     private Map<String, Object> getUserKeyboard(User user, String shopId) {
@@ -745,10 +796,14 @@ public class LoyaltyBotService {
         } else {
             // Клавиатура пользователя
             rows.add(List.of(
+                Map.of("text", BTN_OPEN_SHOP),
+                Map.of("text", BTN_CATALOG)
+            ));
+            rows.add(List.of(
                 Map.of("text", BTN_PURCHASE),
                 Map.of("text", BTN_MY_STATUS)
             ));
-            
+
             List<Map<String, Object>> row2 = new ArrayList<>();
             if (shopSettingsService.isStampsEnabled(shopId)) {
                 row2.add(Map.of("text", BTN_STAMPS));
@@ -759,10 +814,13 @@ public class LoyaltyBotService {
             if (!row2.isEmpty()) {
                 rows.add(row2);
             }
-            
+
             rows.add(List.of(
-                Map.of("text", BTN_ACHIEVEMENTS),
                 Map.of("text", BTN_HISTORY)
+            ));
+
+            rows.add(List.of(
+                Map.of("text", BTN_ACHIEVEMENTS)
             ));
         }
         

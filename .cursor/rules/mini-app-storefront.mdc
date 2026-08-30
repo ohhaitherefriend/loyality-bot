@@ -1,0 +1,32 @@
+---
+description: Telegram Mini App storefront implementation rules
+globs:
+  - "src/main/java/**/*.java"
+  - "src/main/resources/**/*.yml"
+  - "src/main/resources/db/migration/*.sql"
+  - "admin-panel/src/**/*"
+  - "docs/**/*.md"
+alwaysApply: true
+---
+
+You are working on the Zabotik loyalty-bot project.
+
+Read `docs/telegram-mini-app-storefront.md` before implementing Mini App tasks.
+
+Important rules:
+- Do not remove existing Telegram bot catalog.
+- Keep bot catalog as fallback.
+- Main ecommerce UX should be Telegram Mini App.
+- Do not implement payments, fiscal receipts, delivery provider integrations, 1C, SDEK or marketplace logic.
+- Do not expose admin APIs to storefront.
+- Do not expose supplierPrice in storefront API.
+- Do not expose hidden products.
+- Do not expose unapproved image candidates.
+- Do not expose bot token or API keys to frontend.
+- Storefront must show only active=true and visible=true products.
+- Storefront must show only approved product images.
+- Order creation must validate product/shop/visibility/stock on backend.
+- Do not trust frontend prices.
+- Telegram initData must be validated on backend before trusting Telegram user id.
+- Existing admin panel and orders page must continue working.
+- Backend and frontend builds must pass.

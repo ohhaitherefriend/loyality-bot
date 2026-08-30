@@ -11,15 +11,27 @@ import { SettingsPage } from '@/features/settings/SettingsPage'
 import { LinksPage } from '@/features/links/LinksPage'
 import { StatusPage } from '@/features/status/StatusPage'
 import { ReportsPage } from '@/features/reports/ReportsPage'
+import { OrdersPage } from '@/features/orders/OrdersPage'
+import { CatalogPage } from '@/features/catalog/CatalogPage'
 import { LandingPage } from '@/features/landing'
 import { PricingPage } from '@/features/pricing/PricingPage'
 import { OfferPage } from '@/features/legal/OfferPage'
 import { PrivacyPage } from '@/features/legal/PrivacyPage'
 import { DetailsPage } from '@/features/legal/DetailsPage'
+import {
+  StorefrontApp,
+  StorefrontCatalogPage,
+  StorefrontProductPage,
+  StorefrontCartPage,
+  StorefrontOrderSuccessPage,
+} from '@/features/storefront'
 import { useShopStore } from '@/lib/store'
+import { useAuthStore } from '@/lib/auth-store'
 
 function App() {
   const { shopId } = useShopStore()
+  const { shops } = useAuthStore()
+  const currentShopId = shopId || shops[0]?.shopId || null
 
   return (
     <>
@@ -52,22 +64,38 @@ function App() {
           <Route path="connect" element={<ConnectPage />} />
           <Route 
             path="settings" 
-            element={shopId ? <SettingsPage /> : <Navigate to="/connect" replace />} 
+            element={currentShopId ? <SettingsPage /> : <Navigate to="/connect" replace />} 
           />
           <Route 
             path="links" 
-            element={shopId ? <LinksPage /> : <Navigate to="/connect" replace />} 
+            element={currentShopId ? <LinksPage /> : <Navigate to="/connect" replace />} 
           />
           <Route 
             path="status" 
-            element={shopId ? <StatusPage /> : <Navigate to="/connect" replace />} 
+            element={currentShopId ? <StatusPage /> : <Navigate to="/connect" replace />} 
           />
           <Route 
             path="reports" 
-            element={shopId ? <ReportsPage /> : <Navigate to="/connect" replace />} 
+            element={currentShopId ? <ReportsPage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="orders" 
+            element={currentShopId ? <OrdersPage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="catalog" 
+            element={currentShopId ? <CatalogPage /> : <Navigate to="/connect" replace />} 
           />
         </Route>
         
+        {/* Telegram Mini App storefront */}
+        <Route path="/store/:shopId" element={<StorefrontApp />}>
+          <Route index element={<StorefrontCatalogPage />} />
+          <Route path="products/:productId" element={<StorefrontProductPage />} />
+          <Route path="cart" element={<StorefrontCartPage />} />
+          <Route path="success/:orderId" element={<StorefrontOrderSuccessPage />} />
+        </Route>
+
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

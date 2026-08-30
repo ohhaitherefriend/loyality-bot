@@ -1,5 +1,6 @@
 package com.plstk.loyaltybot.service;
 
+import com.plstk.loyaltybot.config.CommerceProperties;
 import com.plstk.loyaltybot.entity.BotInstance;
 import com.plstk.loyaltybot.entity.MessengerPlatform;
 import com.plstk.loyaltybot.entity.ShopSettings;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.telegram.telegrambots.meta.api.objects.Update;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -35,6 +37,7 @@ public class BotInstanceService {
     private final MaxApiClient maxApiClient;
     private final TokenEncryptionService tokenEncryptionService;
     private final ShopSettingsService shopSettingsService;
+    private final CommerceProperties commerceProperties;
     
     @Value("${server.base-url:}")
     private String serverBaseUrl;
@@ -441,7 +444,7 @@ public class BotInstanceService {
     }
     
     private void setupBotCommands(String botToken, BotInstance.BusinessType businessType) {
-        List<TelegramApiClient.BotCommand> commands = switch (businessType) {
+        List<TelegramApiClient.BotCommand> commands = new ArrayList<>(switch (businessType) {
             case COFFEE -> List.of(
                 new TelegramApiClient.BotCommand("start", "Начать / Регистрация"),
                 new TelegramApiClient.BotCommand("buy", "Совершить покупку"),
@@ -460,7 +463,11 @@ public class BotInstanceService {
                 new TelegramApiClient.BotCommand("points", "Мои баллы"),
                 new TelegramApiClient.BotCommand("status", "Мой статус")
             );
-        };
+        });
+
+        if (commerceProperties.getMiniApp().isEnabled()) {
+            commands.add(1, new TelegramApiClient.BotCommand("shop", "Открыть магазин"));
+        }
         
         try {
             telegramApiClient.setMyCommands(botToken, commands);

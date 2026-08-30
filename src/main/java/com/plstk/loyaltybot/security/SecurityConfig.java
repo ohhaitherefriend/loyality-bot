@@ -51,10 +51,12 @@ public class SecurityConfig {
                     .requestMatchers(new AntPathRequestMatcher("/api/auth/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/api/billing/cloudpayments/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/api/billing/plans")).permitAll()
+                    .requestMatchers(new AntPathRequestMatcher("/api/storefront/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/tg/webhook/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/max/webhook/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/health")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/info")).permitAll()
+                    .requestMatchers(new AntPathRequestMatcher("/files/product-images/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/**")).authenticated()
                     .requestMatchers(
                         new AntPathRequestMatcher("/"),
@@ -102,11 +104,20 @@ public class SecurityConfig {
                 Arrays.asList(corsAllowedOrigins.split(","))
             );
         } else {
-            configuration.setAllowedOriginPatterns(List.of("http://localhost:*"));
+            configuration.setAllowedOriginPatterns(List.of(
+                    "http://localhost:*",
+                    "http://127.0.0.1:*"
+            ));
         }
         
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
-        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept"));
+        configuration.setAllowedHeaders(List.of(
+                "Authorization",
+                "Content-Type",
+                "Accept",
+                "X-Telegram-Init-Data",
+                "X-Storefront-Session-Id"
+        ));
         configuration.setAllowCredentials(true);
         configuration.setMaxAge(3600L);
         

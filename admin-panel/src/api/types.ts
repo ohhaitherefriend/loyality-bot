@@ -14,6 +14,40 @@ export type SubscriptionStatus = 'TRIALING' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED'
 
 export type OnboardingStep = 'START' | 'SHOP_CREATED' | 'BOT_CONNECTED' | 'SETTINGS_DONE' | 'COMPLETED'
 
+export type OrderStatus =
+  | 'DRAFT'
+  | 'CREATED'
+  | 'CONFIRMED'
+  | 'PACKING'
+  | 'READY_FOR_PICKUP'
+  | 'SHIPPED'
+  | 'COMPLETED'
+  | 'CANCELLED'
+
+export type DeliveryType = 'PICKUP' | 'COURIER' | 'CDEK' | 'OTHER'
+
+export type AvailabilityMode = 'IN_STOCK' | 'PREORDER' | 'OUT_OF_STOCK'
+
+export type ImageStatus =
+  | 'MISSING'
+  | 'CANDIDATE_FOUND'
+  | 'DOWNLOADED'
+  | 'NORMALIZED'
+  | 'NEEDS_REVIEW'
+  | 'APPROVED'
+  | 'REJECTED'
+  | 'FAILED'
+
+export type ImageType = 'MAIN' | 'CANDIDATE' | 'PLACEHOLDER'
+
+export type ImageSourceType =
+  | 'SUPPLIER'
+  | 'BRAND_OFFICIAL'
+  | 'MARKETPLACE_CANDIDATE'
+  | 'MANUAL_UPLOAD'
+  | 'MANUAL_URL'
+  | 'AI_PLACEHOLDER'
+
 // ========== Auth DTOs ==========
 
 export interface RegisterRequest {
@@ -350,6 +384,203 @@ export interface WeeklyReport {
 export interface PermanentDiscountTier {
   amount: number
   percent: number
+}
+
+// ========== Commerce Orders ==========
+
+export type OrderSource = 'BOT' | 'MINI_APP' | 'ADMIN'
+
+export interface OrderSummary {
+  id: number
+  shopId: string
+  userId: number
+  status: OrderStatus
+  source?: OrderSource
+  itemsTotal: number
+  bonusSpent: number
+  totalToPay: number
+  bonusAccrued: number
+  customerPhone?: string
+  customerName?: string
+  deliveryType: DeliveryType
+  createdAt: string
+  completedAt?: string
+  cancelledAt?: string
+}
+
+export interface OrderItem {
+  id: number
+  productId: number
+  skuSnapshot?: string
+  barcodeSnapshot?: string
+  brandSnapshot?: string
+  nameSnapshot: string
+  priceSnapshot: number
+  availabilityModeSnapshot: AvailabilityMode
+  quantity: number
+  lineTotal: number
+}
+
+export interface OrderDetails extends OrderSummary {
+  deliveryAddress?: string
+  customerComment?: string
+  updatedAt?: string
+  items: OrderItem[]
+}
+
+export interface OrderPageResponse {
+  content: OrderSummary[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
+}
+
+export interface OrderStatusUpdateRequest {
+  status: OrderStatus
+}
+
+// ========== Commerce Catalog ==========
+
+export interface Product {
+  id: number
+  shopId: string
+  supplierGuid?: string
+  sourceSheet?: string
+  sourceRow?: number
+  brand: string
+  supplierArticle: string
+  barcode?: string
+  name: string
+  description?: string
+  categoryPath?: string
+  supplierPrice?: number
+  salePrice?: number
+  oldPrice?: number
+  currency?: string
+  stockQuantity?: number | null
+  availabilityMode: AvailabilityMode
+  visible: boolean
+  active: boolean
+  mainImageUrl?: string
+  previewImageUrl?: string
+  imageStatus: ImageStatus
+  priceListDate?: string
+  lastImportedAt?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ProductPageResponse {
+  content: Product[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
+}
+
+export interface ProductUpdateRequest {
+  salePrice?: number | null
+  oldPrice?: number | null
+  visible?: boolean
+  active?: boolean
+  stockQuantity?: number | null
+  availabilityMode?: AvailabilityMode
+  description?: string | null
+}
+
+export interface ProductImportResponse {
+  batchId: number
+  filename: string
+  priceListDate?: string
+  totalRows: number
+  importedCount: number
+  updatedCount: number
+  skippedCount: number
+  status: string
+  errorMessage?: string
+}
+
+export interface ProductImage {
+  id: number
+  productId: number
+  shopId: string
+  imageType: ImageType
+  status: ImageStatus
+  sourceType: ImageSourceType
+  sourceUrl?: string
+  sourcePageUrl?: string
+  sourceDomain?: string
+  originalUrl?: string
+  normalizedUrl?: string
+  confidence?: number
+  matchedBy?: string
+  approvedByAdmin?: boolean
+  aiNormalized?: boolean
+  rejectReason?: string
+  visualQualityScore?: number
+  qualityDecision?: string
+  qualityWarnings?: string
+  normalizationProvider?: string
+  backgroundRemoved?: boolean
+  scaleNormalized?: boolean
+  angleNormalized?: boolean
+  manualReviewReason?: string
+  rankerReason?: string
+  rankerWarnings?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ImageSearchStatus {
+  imageSearchEnabled: boolean
+  imageSearchProvider: string
+  imageSearchConfigured: boolean
+  ranker: string
+  rankerConfigured: boolean
+  backgroundRemovalProvider: string
+  backgroundRemovalConfigured: boolean
+  backgroundRemovalHealthy: boolean
+  backgroundRemovalHealthUrl: string
+  normalizationOutputSize: number
+}
+
+export interface BulkImageSearchRequest {
+  productIds: number[]
+  maxCandidatesPerProduct?: number
+  downloadAndNormalize?: boolean
+}
+
+export interface BulkImageSearchResponse {
+  processedProducts: number
+  candidatesFound: number
+  rankedMatches: number
+  candidatesRejectedByQuality: number
+  imagesDownloaded: number
+  backgroundRemovalSucceeded: number
+  backgroundRemovalFailed: number
+  fallbackNormalized: number
+  imagesNormalized: number
+  needsReview: number
+  failedCount: number
+  errors: string[]
+}
+
+export interface ProductListParams {
+  page?: number
+  size?: number
+  query?: string
+  brand?: string
+  visible?: boolean
+  active?: boolean
+  missingImages?: boolean
+}
+
+export interface CatalogImportParams {
+  file: File
+  defaultMarkupPercent?: number
+  makeImportedVisible?: boolean
+  overwriteManualFields?: boolean
 }
 
 // ========== API Error ==========

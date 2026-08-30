@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -163,7 +164,8 @@ public class User {
         AWAITING_PROMOTION_DISCOUNT,  // Ожидание ввода процента скидки для акции
         AWAITING_PROMOTION_DURATION,  // Ожидание ввода срока действия акции
         AWAITING_PROMOTION_DESCRIPTION,  // Ожидание ввода описания акции
-        AWAITING_CLIENT_NOTE  // Ожидание ввода заметки о клиенте (для персонала)
+        AWAITING_CLIENT_NOTE,  // Ожидание ввода заметки о клиенте (для персонала)
+        AWAITING_ORDER_ADDRESS  // Ожидание адреса доставки для заказа
     }
     
     /**
@@ -425,6 +427,14 @@ public class User {
     /**
      * Обновляет статистику после покупки
      */
+    public void recordPurchase(BigDecimal amount, boolean isFastCheckout) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            recordPurchase(0.0, isFastCheckout);
+            return;
+        }
+        recordPurchase(amount.doubleValue(), isFastCheckout);
+    }
+
     public void recordPurchase(Double amount, boolean isFastCheckout) {
         LocalDateTime now = LocalDateTime.now();
         

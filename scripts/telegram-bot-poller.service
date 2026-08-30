@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram bot long-polling bridge for loyalty-bot
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ohhaithere
+Environment=LOYALTY_ENV_FILE=/home/ohhaithere/loyalty-bot/.env
+Environment=POLLER_WEBHOOK_BASE=http://127.0.0.1:8080/tg/webhook
+Environment=POLLER_TIMEOUT_SEC=5
+Environment=POLLER_BOT_REFRESH_SEC=30
+ExecStart=/usr/bin/python3 /usr/local/bin/telegram-bot-poller.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
