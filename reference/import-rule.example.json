@@ -1,0 +1,41 @@
+{
+  "sheetSelectors": [
+    "Косметика и уход",
+    "Парфюмерия"
+  ],
+  "headerRow": 6,
+  "firstDataRow": 7,
+  "skipIf": [
+    {
+      "column": "rawName",
+      "matches": "^(категория|итого|всего)$"
+    }
+  ],
+  "columns": {
+    "externalSku": ["Артикул", "Код"],
+    "barcode": ["Штрихкод", "EAN"],
+    "rawName": ["Наименование", "Товар"],
+    "brand": ["Бренд", "Производитель"],
+    "supplierPrice": ["Цена", "Опт"],
+    "stock": ["Остаток", "Количество"]
+  },
+  "requiredFields": [
+    "rawName",
+    "supplierPrice"
+  ],
+  "defaults": {
+    "currency": "RUB"
+  },
+  "transformations": [
+    {
+      "field": "rawName",
+      "operation": "collapseWhitespace"
+    },
+    {
+      "field": "supplierPrice",
+      "operation": "parseDecimal",
+      "locale": "ru-RU"
+    }
+  ]
+}
+

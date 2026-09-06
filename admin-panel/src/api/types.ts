@@ -28,6 +28,8 @@ export type DeliveryType = 'PICKUP' | 'COURIER' | 'CDEK' | 'OTHER'
 
 export type AvailabilityMode = 'IN_STOCK' | 'PREORDER' | 'OUT_OF_STOCK'
 
+export type MailAuthMode = 'OAUTH2' | 'APP_PASSWORD'
+
 export type ImageStatus =
   | 'MISSING'
   | 'CANDIDATE_FOUND'
@@ -581,6 +583,342 @@ export interface CatalogImportParams {
   defaultMarkupPercent?: number
   makeImportedVisible?: boolean
   overwriteManualFields?: boolean
+}
+
+// ========== Supplier email ingestion (Prompt 02) ==========
+
+export interface MailboxConnection {
+  id: number
+  label: string
+  host: string
+  port: number
+  username: string
+  authMode?: MailAuthMode
+  folder: string
+  useTls: boolean
+  enabled: boolean
+  lastPollAt?: string
+  lastPollSuccessAt?: string
+  lastPollError?: string
+}
+
+export interface CreateMailboxRequest {
+  label: string
+  host: string
+  port: number
+  username: string
+  secret: string
+  authMode?: MailAuthMode
+  folder?: string
+  useTls?: boolean
+  enabled?: boolean
+}
+
+export interface TestConnectionResponse {
+  success: boolean
+  message: string
+}
+
+export interface PollResponse {
+  status: string
+  ingestedCount: number
+  skippedCount: number
+  message?: string
+}
+
+export interface ManualImportUploadResponse {
+  importFileId: number
+  batchId: number
+  status: ImportBatchStatus
+  alreadyExisted: boolean
+}
+
+export interface Supplier {
+  id: number
+  name: string
+  code?: string
+  active: boolean
+}
+
+export interface CreateSupplierRequest {
+  name: string
+  code?: string
+}
+
+export interface SupplierSource {
+  id: number
+  label: string
+  supplierId: number
+  supplierName: string
+  mailboxConnectionId?: number
+  senderAllowlist?: string
+  subjectPattern?: string
+  filenamePattern?: string
+  enabled: boolean
+  shadowMode: boolean
+  autoApply: boolean
+}
+
+export interface CreateSupplierSourceRequest {
+  supplierId: number
+  label: string
+  mailboxConnectionId?: number
+  senderAllowlist?: string
+  subjectPattern?: string
+  filenamePattern?: string
+}
+
+// ========== Operations UI (Prompt 07 automation control panel) ==========
+
+export type ImportRowStatus =
+  | 'PENDING'
+  | 'EXACT_MATCH'
+  | 'LEARNED_MATCH'
+  | 'AI_MATCH'
+  | 'AUTO_APPROVED'
+  | 'NEEDS_REVIEW'
+  | 'NEW_PRODUCT'
+  | 'IGNORED'
+  | 'INVALID'
+  | 'APPROVED'
+  | 'APPLIED'
+
+export type ImportBatchStatus =
+  | 'RECEIVED'
+  | 'STORED'
+  | 'PARSING'
+  | 'NORMALIZING'
+  | 'MATCHING'
+  | 'VALIDATING'
+  | 'AUTO_APPROVED'
+  | 'NEEDS_ATTENTION'
+  | 'APPROVED'
+  | 'APPLYING'
+  | 'APPLIED'
+  | 'QUARANTINED'
+  | 'FAILED'
+
+export type RuleVersionStatus = 'DRAFT' | 'ACTIVE' | 'RETIRED'
+
+export type DecidedBy = 'SYSTEM' | 'HUMAN'
+
+export type MatchDecisionType =
+  | 'EXACT'
+  | 'LEARNED'
+  | 'AI_MATCH'
+  | 'AI_NO_MATCH'
+  | 'NEW_PRODUCT'
+  | 'MANUAL'
+  | 'NO_MATCH'
+
+export type RowReviewAction = 'MATCH' | 'NO_MATCH' | 'CREATE_PRODUCT' | 'IGNORE'
+
+export interface PageResponse<T> {
+  content: T[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
+}
+
+export interface ImportDashboardResponse {
+  automationRate: {
+    autoDecidedRows: number
+    humanDecidedRows: number
+    ratePercent: number | null
+  }
+  batches: {
+    total: number
+    running: number
+    needsAttention: number
+    failed: number
+    quarantined: number
+    applied: number
+  }
+  exceptionQueueSize: number
+  mailboxes: Array<{
+    mailboxId: number
+    label: string
+    enabled: boolean
+    lastPollAt?: string
+    lastPollSuccessAt?: string
+    lastPollError?: string
+    healthy: boolean
+  }>
+  supplierExceptionRates: Array<{
+    supplierId: number
+    supplierName: string
+    totalRows: number
+    exceptionRows: number
+    exceptionRatePercent: number
+  }>
+  recentActivity: {
+    windowHours: number
+    filesProcessed: number
+    rowsProcessed: number
+  }
+  recentProductChanges: {
+    windowHours: number
+    added: number
+    updated: number
+    priceChanged: number
+    removedFromStorefront: number
+    reactivated: number
+  }
+}
+
+export interface RowExceptionSummary {
+  rowId: number
+  version: number
+  batchId: number
+  supplierSourceId: number
+  supplierSourceLabel: string
+  supplierId: number
+  supplierName: string
+  sourceSheet?: string
+  sourceRowNumber?: number
+  status: ImportRowStatus
+  rawNamePreview?: string
+  brandPreview?: string
+  supplierPricePreview?: number
+  createdAt: string
+}
+
+export interface BatchExceptionSummary {
+  batchId: number
+  status: ImportBatchStatus
+  supplierSourceId: number
+  supplierSourceLabel: string
+  supplierId: number
+  supplierName: string
+  originalFilename?: string
+  totalRows?: number
+  validRows?: number
+  invalidRows?: number
+  attemptNumber?: number
+  errorMessage?: string
+  createdAt: string
+  finishedAt?: string
+}
+
+export interface BatchDetailResponse {
+  batchId: number
+  status: ImportBatchStatus
+  supplierSourceId: number
+  supplierSourceLabel: string
+  supplierId: number
+  supplierName: string
+  originalFilename?: string
+  fileSizeBytes?: number
+  fileReceivedAt?: string
+  ruleVersionId?: number
+  ruleVersionNumber?: number
+  ruleVersionStatus?: RuleVersionStatus
+  totalRows?: number
+  validRows?: number
+  invalidRows?: number
+  attemptNumber?: number
+  errorMessage?: string
+  rowStatusCounts: Record<string, number>
+  offersAddedCount?: number
+  offersUpdatedCount?: number
+  offersPriceChangedCount?: number
+  offersUnchangedCount?: number
+  productsRemovedFromStorefrontCount?: number
+  productsReactivatedCount?: number
+  startedAt?: string
+  finishedAt?: string
+  appliedAt?: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface RowListItem {
+  rowId: number
+  version: number
+  sourceSheet?: string
+  sourceRowNumber?: number
+  status: ImportRowStatus
+  rawNamePreview?: string
+  brandPreview?: string
+  supplierPricePreview?: number
+  matchedProductId?: number
+  matchedProductName?: string
+  createdAt: string
+}
+
+export interface ScoredCandidate {
+  productId: number
+  productName: string
+  totalScore: number
+  componentScores: Record<string, number>
+  matchedAttributes: string[]
+  conflicts: string[]
+  candidateAttributes?: Record<string, unknown>
+}
+
+export interface MatchDecisionAudit {
+  id: number
+  decisionType: MatchDecisionType
+  decidedBy: DecidedBy
+  chosenProductId?: number
+  chosenProductName?: string
+  confidenceScore?: number
+  modelProvider?: string
+  modelName?: string
+  promptVersion?: string
+  conflicts: string[]
+  reason?: string
+  reviewerUserId?: number
+  reviewerEmail?: string
+  decidedAt: string
+}
+
+export interface RowDetailResponse {
+  rowId: number
+  version: number
+  batchId: number
+  sourceSheet?: string
+  sourceRowNumber?: number
+  status: ImportRowStatus
+  rawData: Record<string, string>
+  normalizedData?: Record<string, unknown>
+  candidates: ScoredCandidate[]
+  matchedProductId?: number
+  matchedProductName?: string
+  decisions: MatchDecisionAudit[]
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface RowReviewRequest {
+  action: RowReviewAction
+  expectedVersion?: number
+  productId?: number
+  note?: string
+}
+
+export interface RowReviewResult {
+  rowId: number
+  version: number
+  status: ImportRowStatus
+  matchedProductId?: number
+}
+
+export interface BulkRowReviewRequest {
+  rowIds: number[]
+  action: RowReviewAction
+  note?: string
+}
+
+export interface BulkReviewResult {
+  succeededRowIds: number[]
+  failures: Record<number, string>
+}
+
+export interface VersionConflictError {
+  message: string
+  currentVersion?: number
 }
 
 // ========== API Error ==========

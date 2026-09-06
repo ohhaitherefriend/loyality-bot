@@ -84,6 +84,16 @@ public class Product {
     @Builder.Default
     private Boolean active = true;
 
+    /**
+     * Explicit operator override (Prompt 06, D-006/docs/ARCHITECTURE.md §14.8): when {@code true},
+     * {@code CatalogAvailabilityService} always keeps this product hidden regardless of active
+     * supplier offers. Automatic sync (offer reconciliation, reactivation) never clears this flag -
+     * only an explicit operator action does (future Prompt 07 UI action {@code SET_MANUAL_HIDDEN}).
+     */
+    @Column(nullable = false)
+    @Builder.Default
+    private Boolean manualHidden = false;
+
     @Column(length = 2048)
     private String mainImageUrl;
 

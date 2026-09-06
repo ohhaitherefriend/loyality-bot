@@ -29,6 +29,29 @@ spring:
       enabled: true
       path: /h2-console
 
+  # Spring Boot's own defaults (max-file-size=1MB, max-request-size=10MB) are well below
+  # supplier-import.storage.max-file-size-bytes (30MB default) - without this, the manual-upload
+  # endpoint (SupplierImportAdminController) would reject every real supplier price file with a
+  # generic multipart error before AttachmentIngestionService's own size check ever runs. Kept a
+  # little above the app-level limit so that check (not this framework-level one) produces the
+  # actionable error message.
+  servlet:
+    multipart:
+      max-file-size: ${SUPPLIER_IMPORT_MULTIPART_MAX_FILE_SIZE:40MB}
+      max-request-size: ${SUPPLIER_IMPORT_MULTIPART_MAX_REQUEST_SIZE:45MB}
+
+  # Bounded thread pool for ALL @Scheduled jobs in the app (loyalty cron jobs + supplier-import
+  # mailbox/parsing/normalizing/matching/validation/apply jobs). Without this, Spring Boot's
+  # default TaskScheduler has a pool size of 1, so every @Scheduled method in the whole
+  # application - across unrelated domains - serializes onto a single shared thread; a slow IMAP
+  # poll or a large batch apply would silently delay every other scheduled job. Each job type
+  # still has its own DB-backed claim/lease (see ImportJobClaimService), so running multiple job
+  # types concurrently is safe.
+  task:
+    scheduling:
+      pool:
+        size: ${SCHEDULING_POOL_SIZE:10}
+
 # ========== BYOB Multi-tenant Configuration ==========
 
 # Server configuration
@@ -57,9 +80,12 @@ billing:
   enforcement-mode: ${BILLING_ENFORCEMENT_MODE:STRICT}
 
 # CloudPayments
+# No hardcoded fallback secret here on purpose: CloudPaymentsService already defaults
+# api-secret to "" when the env var is unset, which safely skips HMAC validation (dev-only
+# behavior) instead of silently trusting a real-looking value checked into git.
 cloudpayments:
-  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:pk_8671a509172fdf03f6e68c7b8a1ab}
-  api-secret: ${CLOUDPAYMENTS_API_SECRET:75698e3a81d1b365264dac03a637d392}
+  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:}
+  api-secret: ${CLOUDPAYMENTS_API_SECRET:}
 
 # Telegram Bot Configuration (legacy single-bot mode)
 telegram:
@@ -84,12 +110,14 @@ loyalty:
     silver-threshold: 500
     gold-threshold: 1000
 
-# Actuator endpoints для health checks
+# Actuator endpoints для health checks. prometheus exposes supplier-import pipeline health
+# counters (SupplierImportMetrics). Already behind SecurityConfig's
+# `.requestMatchers("/actuator/**").authenticated()` - only health/info are permitAll.
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: when-authorized
@@ -143,3 +171,79 @@ commerce:
     public-url: ${COMMERCE_MINI_APP_PUBLIC_URL:http://localhost:3000}
     require-telegram-auth: ${COMMERCE_MINI_APP_REQUIRE_TELEGRAM_AUTH:true}
     init-data-max-age-seconds: ${COMMERCE_MINI_APP_INIT_DATA_MAX_AGE_SECONDS:86400}
+
+# Supplier import automation foundation (Prompt 01) + email ingestion (Prompt 02).
+# No mailbox is configured by default, so the app must start fine with only these defaults;
+# the polling job simply finds zero enabled mailboxes and no-ops.
+supplier-import:
+  storage:
+    base-path: ${SUPPLIER_IMPORT_STORAGE_PATH:./data/import-files}
+    max-file-size-bytes: ${SUPPLIER_IMPORT_MAX_FILE_SIZE_BYTES:31457280}
+  job:
+    default-lease-seconds: ${SUPPLIER_IMPORT_JOB_LEASE_SECONDS:300}
+    mailbox-poll-interval-ms: ${SUPPLIER_IMPORT_MAILBOX_POLL_INTERVAL_MS:300000}
+    mailbox-poll-initial-delay-ms: ${SUPPLIER_IMPORT_MAILBOX_POLL_INITIAL_DELAY_MS:15000}
+    parsing-interval-ms: ${SUPPLIER_IMPORT_PARSING_INTERVAL_MS:30000}
+    parsing-initial-delay-ms: ${SUPPLIER_IMPORT_PARSING_INITIAL_DELAY_MS:20000}
+    parsing-lease-seconds: ${SUPPLIER_IMPORT_PARSING_LEASE_SECONDS:300}
+    normalizing-interval-ms: ${SUPPLIER_IMPORT_NORMALIZING_INTERVAL_MS:30000}
+    normalizing-initial-delay-ms: ${SUPPLIER_IMPORT_NORMALIZING_INITIAL_DELAY_MS:25000}
+    normalizing-lease-seconds: ${SUPPLIER_IMPORT_NORMALIZING_LEASE_SECONDS:300}
+    matching-interval-ms: ${SUPPLIER_IMPORT_MATCHING_INTERVAL_MS:30000}
+    matching-initial-delay-ms: ${SUPPLIER_IMPORT_MATCHING_INITIAL_DELAY_MS:35000}
+    matching-lease-seconds: ${SUPPLIER_IMPORT_MATCHING_LEASE_SECONDS:300}
+    validation-interval-ms: ${SUPPLIER_IMPORT_VALIDATION_INTERVAL_MS:30000}
+    validation-initial-delay-ms: ${SUPPLIER_IMPORT_VALIDATION_INITIAL_DELAY_MS:40000}
+    validation-lease-seconds: ${SUPPLIER_IMPORT_VALIDATION_LEASE_SECONDS:300}
+    apply-interval-ms: ${SUPPLIER_IMPORT_APPLY_INTERVAL_MS:30000}
+    apply-initial-delay-ms: ${SUPPLIER_IMPORT_APPLY_INITIAL_DELAY_MS:45000}
+    apply-lease-seconds: ${SUPPLIER_IMPORT_APPLY_LEASE_SECONDS:600}
+  # AI layout detection (Prompt 03) + AI catalog matcher (Prompt 05) share the same DeepSeek
+  # account/HTTP client config below. No key configured by default -> Disabled*/no-op providers are
+  # wired instead, and a batch/row that actually needs AI is quarantined/NEEDS_REVIEW with a clear
+  # reason instead of failing app startup.
+  ai:
+    deepseek:
+      api-key: ${SUPPLIER_IMPORT_DEEPSEEK_API_KEY:}
+      model: ${SUPPLIER_IMPORT_DEEPSEEK_MODEL:deepseek-chat}
+      base-url: ${SUPPLIER_IMPORT_DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      timeout-ms: ${SUPPLIER_IMPORT_DEEPSEEK_TIMEOUT_MS:20000}
+      max-retries: ${SUPPLIER_IMPORT_DEEPSEEK_MAX_RETRIES:2}
+      retry-backoff-ms: ${SUPPLIER_IMPORT_DEEPSEEK_RETRY_BACKOFF_MS:500}
+  parser:
+    max-sheets: ${SUPPLIER_IMPORT_PARSER_MAX_SHEETS:10}
+    max-rows-per-sheet: ${SUPPLIER_IMPORT_PARSER_MAX_ROWS:20000}
+    max-columns: ${SUPPLIER_IMPORT_PARSER_MAX_COLUMNS:200}
+    max-cell-length: ${SUPPLIER_IMPORT_PARSER_MAX_CELL_LENGTH:4000}
+    ai-sample-rows: ${SUPPLIER_IMPORT_PARSER_AI_SAMPLE_ROWS:15}
+    ai-sample-columns: ${SUPPLIER_IMPORT_PARSER_AI_SAMPLE_COLUMNS:30}
+    ai-sample-cell-max-length: ${SUPPLIER_IMPORT_PARSER_AI_SAMPLE_CELL_MAX_LENGTH:160}
+    preview-row-count: ${SUPPLIER_IMPORT_PARSER_PREVIEW_ROW_COUNT:30}
+    preview-min-valid-row-ratio: ${SUPPLIER_IMPORT_PARSER_PREVIEW_MIN_VALID_ROW_RATIO:0.5}
+    final-min-valid-row-ratio: ${SUPPLIER_IMPORT_PARSER_FINAL_MIN_VALID_ROW_RATIO:0.5}
+  # Deterministic normalization + candidate search (Prompt 04) and AI matcher automation gates
+  # (Prompt 05): fuzzy candidates are bounded to max-candidates and passed to AiCatalogMatcher, which
+  # may only select one of them (or NO_MATCH) - never a candidate outside this list.
+  matching:
+    candidate-fetch-limit: ${SUPPLIER_IMPORT_MATCHING_CANDIDATE_FETCH_LIMIT:300}
+    max-candidates: ${SUPPLIER_IMPORT_MATCHING_MAX_CANDIDATES:10}
+    min-similarity-threshold: ${SUPPLIER_IMPORT_MATCHING_MIN_SIMILARITY_THRESHOLD:0.15}
+    # Opt-in only after confirming V19 (pg_trgm extension + trigram indexes) is actually applied.
+    pg-trgm-enabled: ${SUPPLIER_IMPORT_MATCHING_PG_TRGM_ENABLED:false}
+    # Global defaults for the Prompt 05 automation gate, overridable per SupplierSource. Model
+    # confidence alone can never satisfy this gate - the deterministic score floor always applies too.
+    ai-auto-approve-min-score: ${SUPPLIER_IMPORT_MATCHING_AI_AUTO_APPROVE_MIN_SCORE:0.80}
+    ai-min-confidence: ${SUPPLIER_IMPORT_MATCHING_AI_MIN_CONFIDENCE:0.55}
+    new-product-require-brand: ${SUPPLIER_IMPORT_MATCHING_NEW_PRODUCT_REQUIRE_BRAND:true}
+  # Percentage-based public pricing (Prompt 06, D-007). Last-resort fallback only - a shop's
+  # ShopSettings.defaultCommissionPercent and a SupplierSource.commissionPercentOverride both take
+  # priority when configured.
+  pricing:
+    default-commission-percent: ${SUPPLIER_IMPORT_PRICING_DEFAULT_COMMISSION_PERCENT:30.0}
+  # Batch-level apply guards (Prompt 06, D-012): an anomalous/corrupted file must never be allowed
+  # to mass-deactivate or mass-reprice the assortment - see BatchApplyGuardEvaluator.
+  reconciliation:
+    row-count-collapse-min-ratio: ${SUPPLIER_IMPORT_RECONCILIATION_ROW_COUNT_COLLAPSE_MIN_RATIO:0.5}
+    duplicate-identifier-max-ratio: ${SUPPLIER_IMPORT_RECONCILIATION_DUPLICATE_IDENTIFIER_MAX_RATIO:0.2}
+    price-delta-warn-ratio: ${SUPPLIER_IMPORT_RECONCILIATION_PRICE_DELTA_WARN_RATIO:0.5}
+    price-delta-max-anomalous-row-ratio: ${SUPPLIER_IMPORT_RECONCILIATION_PRICE_DELTA_MAX_ANOMALOUS_ROW_RATIO:0.3}

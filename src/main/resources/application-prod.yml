@@ -20,6 +20,14 @@ spring:
   flyway:
     enabled: false  # Отключаем - миграции для MySQL, используем Hibernate ddl-auto
 
+  # See application.yml for rationale: bounds the shared @Scheduled thread pool so supplier-import
+  # jobs (mailbox poll, parse, normalize, match, validate, apply) and loyalty cron jobs don't
+  # serialize onto a single thread in production.
+  task:
+    scheduling:
+      pool:
+        size: ${SCHEDULING_POOL_SIZE:10}
+
 spring.h2.console.enabled: false
 
 security:
@@ -57,7 +65,10 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # prometheus: supplier-import pipeline health counters (SupplierImportMetrics). Already
+        # behind SecurityConfig's `.requestMatchers("/actuator/**").authenticated()` - only
+        # /actuator/health and /actuator/info are permitAll.
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: when-authorized
@@ -66,9 +77,12 @@ billing:
   trial-days: ${BILLING_TRIAL_DAYS:7}
   enforcement-mode: ${BILLING_ENFORCEMENT_MODE:STRICT}
 
+# No hardcoded fallback secret here on purpose (see application.yml comment). Production must
+# set CLOUDPAYMENTS_API_SECRET explicitly or HMAC validation is skipped, not silently bypassed
+# with a real-looking value checked into git.
 cloudpayments:
-  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:pk_8671a509172fdf03f6e68c7b8a1ab}
-  api-secret: ${CLOUDPAYMENTS_API_SECRET:75698e3a81d1b365264dac03a637d392}
+  public-id: ${CLOUDPAYMENTS_PUBLIC_ID:}
+  api-secret: ${CLOUDPAYMENTS_API_SECRET:}
 
 commerce:
   mini-app:

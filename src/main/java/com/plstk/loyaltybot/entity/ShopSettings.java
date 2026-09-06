@@ -55,7 +55,16 @@ public class ShopSettings {
     
     @Column
     private String telegramChannelUrl;
-    
+
+    /**
+     * Default supplier import commission percent (Prompt 06, D-007), used when a
+     * {@code SupplierSource.commissionPercentOverride} is not set. {@code null} falls through to
+     * the global {@code supplier-import.pricing.default-commission-percent} config default -
+     * see {@code PricingService.resolveCommissionPercent}.
+     */
+    @Column(precision = 7, scale = 2)
+    private java.math.BigDecimal defaultCommissionPercent;
+
     // ========== Накопительная скидка (настраиваемая система) ==========
     
     @Column(nullable = false)

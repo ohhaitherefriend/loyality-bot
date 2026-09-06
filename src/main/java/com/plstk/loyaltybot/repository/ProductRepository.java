@@ -29,6 +29,35 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     Optional<Product> findByShopIdAndBarcode(String shopId, String barcode);
 
+    /**
+     * Unlike {@link #findByShopIdAndBarcode}, returns every match instead of throwing on a
+     * duplicate. A duplicate barcode within one shop is a data anomaly that must fall through to
+     * fuzzy candidate search rather than being auto-matched to an arbitrary one of the two.
+     */
+    List<Product> findAllByShopIdAndBarcode(String shopId, String barcode);
+
+    /**
+     * Bounded shop-scoped candidate pool for {@code SimpleProductCandidateFetcher}: deliberately not
+     * filtered by visible/active, since a previously-deactivated or hidden product must still be
+     * matchable (it can be reactivated by a reappearing supplier offer per D-006).
+     */
+    List<Product> findByShopIdOrderByIdAsc(String shopId, Pageable pageable);
+
+    /**
+     * PostgreSQL-only candidate pool for {@code TrigramProductCandidateFetcher}, requiring the
+     * {@code pg_trgm} extension (see V19). Only ever invoked when
+     * {@code supplier-import.matching.pg-trgm-enabled=true} explicitly selects that fetcher - never
+     * exercised against H2, which has no {@code similarity()} function.
+     */
+    @Query(value = """
+            SELECT * FROM products p
+            WHERE p.shop_id = :shopId
+            ORDER BY similarity(p.name, :searchName) DESC
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<Product> findTopByShopIdOrderBySimilarity(
+            @Param("shopId") String shopId, @Param("searchName") String searchName, @Param("limit") int limit);
+
     Optional<Product> findByShopIdAndSourceSheetAndSupplierArticle(
             String shopId, String sourceSheet, String supplierArticle);
 

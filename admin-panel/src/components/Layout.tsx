@@ -9,6 +9,7 @@ import {
   BarChart3,
   ShoppingBag,
   Package,
+  Mail,
   Menu,
   X,
   LayoutDashboard,
@@ -18,6 +19,7 @@ import {
   MessageCircle,
   AlertTriangle,
   ArrowRight,
+  Gauge,
 } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -44,6 +46,8 @@ const navItems = [
   { path: '/status', label: 'Статус', icon: Activity, requiresShop: true },
   { path: '/reports', label: 'Отчёты', icon: BarChart3, requiresShop: true },
   { path: '/catalog', label: 'Каталог', icon: Package, requiresShop: true },
+  { path: '/mailboxes', label: 'Почта поставщиков', icon: Mail, requiresShop: true },
+  { path: '/operations', label: 'Автоматизация', icon: Gauge, requiresShop: true },
   { path: '/orders', label: 'Заказы', icon: ShoppingBag, requiresShop: true },
   { path: '/billing', label: 'Биллинг', icon: CreditCard, requiresShop: false },
 ]

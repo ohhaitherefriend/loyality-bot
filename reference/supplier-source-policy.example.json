@@ -1,0 +1,22 @@
+{
+  "snapshotMode": "FULL",
+  "snapshotScope": {
+    "type": "SUPPLIER_ALL",
+    "value": null
+  },
+  "commissionPercent": 30.00,
+  "publicPriceStrategy": "LOWEST_ACTIVE_OFFER",
+  "roundingPolicy": {
+    "mode": "CURRENCY_MINOR_UNIT",
+    "scale": 2
+  },
+  "shadowMode": true,
+  "autoApply": false,
+  "guards": {
+    "minimumValidRowRatio": 0.95,
+    "maximumRowCountDropPercent": 30.0,
+    "maximumInvalidPriceRatio": 0.02,
+    "maximumDuplicateRatio": 0.02
+  }
+}
+

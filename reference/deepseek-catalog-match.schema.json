@@ -1,0 +1,44 @@
+{
+  "$comment": "Reference copy of the ACTUAL runtime schema at src/main/resources/supplier-import/catalog-match-response.schema.json (loaded by CatalogMatchResponseValidator). Keep in sync with the runtime resource.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CatalogMatchResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "row_id",
+    "decision",
+    "candidate_id",
+    "confidence",
+    "matched_attributes",
+    "conflicts",
+    "reason"
+  ],
+  "properties": {
+    "row_id": {"type": "string", "minLength": 1},
+    "decision": {"enum": ["MATCH", "NO_MATCH"]},
+    "candidate_id": {"type": ["string", "null"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "matched_attributes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "reason": {"type": "string", "maxLength": 500}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "MATCH"}}},
+      "then": {"properties": {"candidate_id": {"type": "string", "minLength": 1}}}
+    },
+    {
+      "if": {"properties": {"decision": {"const": "NO_MATCH"}}},
+      "then": {"properties": {"candidate_id": {"type": "null"}}}
+    }
+  ]
+}
+

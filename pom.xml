@@ -88,6 +88,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+
+        <!-- Prometheus registry for /actuator/prometheus - supplier-import pipeline health metrics
+             (Prompt 09 hardening: mailbox poll, AI call, batch stage, apply-guard counters). -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
         
         <!-- Spring Security -->
         <dependency>
@@ -132,11 +139,47 @@
             <artifactId>poi-ooxml</artifactId>
             <version>5.2.5</version>
         </dependency>
-        
+
+        <!-- IMAP mailbox client (Prompt 02 email ingestion): Jakarta Mail API + Angus Mail impl -->
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>jakarta.mail</artifactId>
+            <version>2.0.3</version>
+        </dependency>
+
+        <!--
+        JSON Schema validation for AI-generated supplier layout rules (Prompt 03). Pinned to the
+        pre-2.0 API (JsonSchemaFactory/JsonSchema/ValidationMessage) which this code uses; 2.x
+        renamed most of these classes (JsonSchemaFactory -> SchemaRegistry, etc.) and is Jackson-2
+        compatible but API-incompatible with the calls below. Verified compatible with Jackson
+        2.15.x (Spring Boot 3.1.5's version).
+        -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>1.0.87</version>
+        </dependency>
+
         <!-- Spring Boot Starter Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+        Embedded IMAP server for MailboxClient tests. GreenMail 2.0.x's own server internals
+        depend on com.sun.mail:jakarta.mail (com.sun.mail.imap.IMAPStore etc.), which is a
+        different implementation/package from our org.eclipse.angus:jakarta.mail production
+        dependency above; both coexist fine on the classpath since they use different Java
+        packages. ImapMailboxClient pins its exact provider class via the `mail.<protocol>.class`
+        session property, so it always uses Angus regardless of which javamail.providers files
+        are merged from other jars.
+        -->
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail-junit5</artifactId>
+            <version>2.0.1</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

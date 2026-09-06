@@ -13,6 +13,8 @@ import { StatusPage } from '@/features/status/StatusPage'
 import { ReportsPage } from '@/features/reports/ReportsPage'
 import { OrdersPage } from '@/features/orders/OrdersPage'
 import { CatalogPage } from '@/features/catalog/CatalogPage'
+import { MailboxesPage } from '@/features/mailboxes/MailboxesPage'
+import { OperationsDashboardPage, ExceptionsQueuePage, BatchDetailPage } from '@/features/operations'
 import { LandingPage } from '@/features/landing'
 import { PricingPage } from '@/features/pricing/PricingPage'
 import { OfferPage } from '@/features/legal/OfferPage'
@@ -85,6 +87,22 @@ function App() {
           <Route 
             path="catalog" 
             element={currentShopId ? <CatalogPage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="mailboxes" 
+            element={currentShopId ? <MailboxesPage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="operations" 
+            element={currentShopId ? <OperationsDashboardPage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="operations/exceptions" 
+            element={currentShopId ? <ExceptionsQueuePage /> : <Navigate to="/connect" replace />} 
+          />
+          <Route 
+            path="operations/batches/:batchId" 
+            element={currentShopId ? <BatchDetailPage /> : <Navigate to="/connect" replace />} 
           />
         </Route>
         

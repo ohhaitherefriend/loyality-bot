@@ -36,6 +36,28 @@ import type {
   BulkImageSearchRequest,
   BulkImageSearchResponse,
   ImageSearchStatus,
+  MailboxConnection,
+  CreateMailboxRequest,
+  TestConnectionResponse,
+  PollResponse,
+  ManualImportUploadResponse,
+  Supplier,
+  CreateSupplierRequest,
+  SupplierSource,
+  CreateSupplierSourceRequest,
+  ImportDashboardResponse,
+  PageResponse,
+  RowExceptionSummary,
+  BatchExceptionSummary,
+  BatchDetailResponse,
+  RowListItem,
+  RowDetailResponse,
+  RowReviewRequest,
+  RowReviewResult,
+  BulkRowReviewRequest,
+  BulkReviewResult,
+  ImportRowStatus,
+  ImportBatchStatus,
 } from './types'
 
 // ========== Configuration ==========
@@ -475,6 +497,162 @@ class ApiClient {
         body: JSON.stringify(request),
       }
     )
+  }
+
+  // ========== Supplier email ingestion (Prompt 02) ==========
+
+  async listMailboxes(shopId: string): Promise<MailboxConnection[]> {
+    return this.request<MailboxConnection[]>(`/api/shops/${shopId}/mailboxes`)
+  }
+
+  async createMailbox(shopId: string, request: CreateMailboxRequest): Promise<MailboxConnection> {
+    return this.request<MailboxConnection>(`/api/shops/${shopId}/mailboxes`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async testMailbox(shopId: string, mailboxId: number): Promise<TestConnectionResponse> {
+    return this.request<TestConnectionResponse>(`/api/shops/${shopId}/mailboxes/${mailboxId}/test`, {
+      method: 'POST',
+    })
+  }
+
+  async pollMailbox(shopId: string, mailboxId: number): Promise<PollResponse> {
+    return this.request<PollResponse>(`/api/shops/${shopId}/mailboxes/${mailboxId}/poll`, {
+      method: 'POST',
+    })
+  }
+
+  async listSuppliers(shopId: string): Promise<Supplier[]> {
+    return this.request<Supplier[]>(`/api/shops/${shopId}/suppliers`)
+  }
+
+  async createSupplier(shopId: string, request: CreateSupplierRequest): Promise<Supplier> {
+    return this.request<Supplier>(`/api/shops/${shopId}/suppliers`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async listSupplierSources(shopId: string): Promise<SupplierSource[]> {
+    return this.request<SupplierSource[]>(`/api/shops/${shopId}/supplier-sources`)
+  }
+
+  async createSupplierSource(shopId: string, request: CreateSupplierSourceRequest): Promise<SupplierSource> {
+    return this.request<SupplierSource>(`/api/shops/${shopId}/supplier-sources`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async uploadSupplierPrice(
+    shopId: string,
+    supplierSourceId: number,
+    file: File
+  ): Promise<ManualImportUploadResponse> {
+    const formData = new FormData()
+    formData.append('supplierSourceId', String(supplierSourceId))
+    formData.append('file', file)
+    return this.uploadRequest<ManualImportUploadResponse>(
+      `/api/shops/${shopId}/imports/manual-upload`,
+      formData
+    )
+  }
+
+  // ========== Automation control panel (Prompt 07) ==========
+
+  async getImportDashboard(shopId: string, windowHours: number = 24): Promise<ImportDashboardResponse> {
+    return this.request<ImportDashboardResponse>(
+      `/api/shops/${shopId}/operations/dashboard?windowHours=${windowHours}`
+    )
+  }
+
+  async listRowExceptions(
+    shopId: string,
+    params?: { supplierId?: number; page?: number; size?: number }
+  ): Promise<PageResponse<RowExceptionSummary>> {
+    const search = new URLSearchParams()
+    if (params?.supplierId != null) search.set('supplierId', String(params.supplierId))
+    if (params?.page != null) search.set('page', String(params.page))
+    if (params?.size != null) search.set('size', String(params.size))
+    const query = search.toString()
+    return this.request<PageResponse<RowExceptionSummary>>(
+      `/api/shops/${shopId}/operations/exceptions/rows${query ? `?${query}` : ''}`
+    )
+  }
+
+  async listBatchExceptions(
+    shopId: string,
+    params?: { page?: number; size?: number }
+  ): Promise<PageResponse<BatchExceptionSummary>> {
+    const search = new URLSearchParams()
+    if (params?.page != null) search.set('page', String(params.page))
+    if (params?.size != null) search.set('size', String(params.size))
+    const query = search.toString()
+    return this.request<PageResponse<BatchExceptionSummary>>(
+      `/api/shops/${shopId}/operations/exceptions/batches${query ? `?${query}` : ''}`
+    )
+  }
+
+  async getBatchDetail(shopId: string, batchId: number): Promise<BatchDetailResponse> {
+    return this.request<BatchDetailResponse>(`/api/shops/${shopId}/operations/batches/${batchId}`)
+  }
+
+  async listBatchRows(
+    shopId: string,
+    batchId: number,
+    params?: { status?: ImportRowStatus[]; page?: number; size?: number }
+  ): Promise<PageResponse<RowListItem>> {
+    const search = new URLSearchParams()
+    if (params?.status?.length) search.set('status', params.status.join(','))
+    if (params?.page != null) search.set('page', String(params.page))
+    if (params?.size != null) search.set('size', String(params.size))
+    const query = search.toString()
+    return this.request<PageResponse<RowListItem>>(
+      `/api/shops/${shopId}/operations/batches/${batchId}/rows${query ? `?${query}` : ''}`
+    )
+  }
+
+  async getRowDetail(shopId: string, rowId: number): Promise<RowDetailResponse> {
+    return this.request<RowDetailResponse>(`/api/shops/${shopId}/operations/rows/${rowId}`)
+  }
+
+  async reviewRow(shopId: string, rowId: number, request: RowReviewRequest): Promise<RowReviewResult> {
+    return this.request<RowReviewResult>(`/api/shops/${shopId}/operations/rows/${rowId}/review`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async bulkReviewRows(shopId: string, request: BulkRowReviewRequest): Promise<BulkReviewResult> {
+    return this.request<BulkReviewResult>(`/api/shops/${shopId}/operations/rows/bulk-review`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async resumeBatch(shopId: string, batchId: number): Promise<{ batchId: number; status: ImportBatchStatus }> {
+    return this.request(`/api/shops/${shopId}/operations/batches/${batchId}/resume`, {
+      method: 'POST',
+    })
+  }
+
+  async setManualHidden(
+    shopId: string,
+    productId: number,
+    hidden: boolean
+  ): Promise<{ productId: number; manualHidden: boolean; visible: boolean }> {
+    return this.request(`/api/shops/${shopId}/operations/products/${productId}/manual-hidden`, {
+      method: 'POST',
+      body: JSON.stringify({ hidden }),
+    })
+  }
+
+  async approveRuleVersion(shopId: string, ruleVersionId: number): Promise<{ ruleVersionId: number; status: string }> {
+    return this.request(`/api/shops/${shopId}/operations/rule-versions/${ruleVersionId}/approve`, {
+      method: 'POST',
+    })
   }
 }
 
