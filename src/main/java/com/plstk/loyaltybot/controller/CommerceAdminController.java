@@ -1,10 +1,11 @@
 package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.AdminUser;
+import com.plstk.loyaltybot.entity.ShopMember.MemberRole;
 import com.plstk.loyaltybot.entity.commerce.*;
+import com.plstk.loyaltybot.service.AuthorizationService;
 import com.plstk.loyaltybot.service.ProductImportService;
 import com.plstk.loyaltybot.service.ProductService;
-import com.plstk.loyaltybot.service.ShopAccessService;
 import com.plstk.loyaltybot.service.commerce.ImageStorageService;
 import com.plstk.loyaltybot.service.commerce.OrderService;
 import com.plstk.loyaltybot.service.commerce.ProductImageApprovalService;
@@ -35,7 +36,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class CommerceAdminController {
 
-    private final ShopAccessService shopAccessService;
+    private final AuthorizationService authorizationService;
     private final ProductImportService productImportService;
     private final ProductService productService;
     private final ProductImageSearchService productImageSearchService;
@@ -55,7 +56,7 @@ public class CommerceAdminController {
             @RequestParam(defaultValue = "false") boolean overwriteManualFields,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -77,7 +78,7 @@ public class CommerceAdminController {
             @RequestParam(required = false) Boolean missingImages,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -97,7 +98,7 @@ public class CommerceAdminController {
             @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -114,7 +115,7 @@ public class CommerceAdminController {
             @PathVariable Long productId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -130,7 +131,7 @@ public class CommerceAdminController {
             @Valid @RequestBody ProductUpdateRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -145,7 +146,7 @@ public class CommerceAdminController {
             @Valid @RequestBody ProductBulkRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -158,7 +159,7 @@ public class CommerceAdminController {
             @PathVariable String shopId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -171,7 +172,7 @@ public class CommerceAdminController {
             @PathVariable Long productId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -186,7 +187,7 @@ public class CommerceAdminController {
             @Valid @RequestBody DownloadCandidateRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -202,7 +203,7 @@ public class CommerceAdminController {
             @PathVariable Long imageId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -217,7 +218,7 @@ public class CommerceAdminController {
             @PathVariable Long imageId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -233,7 +234,7 @@ public class CommerceAdminController {
             @RequestBody(required = false) RejectImageRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -249,7 +250,7 @@ public class CommerceAdminController {
             @RequestParam("file") MultipartFile file,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -264,7 +265,7 @@ public class CommerceAdminController {
             @Valid @RequestBody ImageFromUrlRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -278,7 +279,7 @@ public class CommerceAdminController {
             @PathVariable Long productId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -293,7 +294,7 @@ public class CommerceAdminController {
             @PathVariable String shopId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -307,7 +308,7 @@ public class CommerceAdminController {
             @Valid @RequestBody BulkImageSearchRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -328,7 +329,7 @@ public class CommerceAdminController {
             @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -342,7 +343,7 @@ public class CommerceAdminController {
             @PathVariable Long orderId,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -357,7 +358,7 @@ public class CommerceAdminController {
             @Valid @RequestBody OrderStatusUpdateRequest request,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
 

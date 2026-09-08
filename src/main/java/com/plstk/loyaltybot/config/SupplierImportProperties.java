@@ -29,10 +29,62 @@ public class SupplierImportProperties {
 
     @Data
     public static class Storage {
-        /** Provider-neutral local root; production может быть заменена S3-compatible реализацией. */
+        /**
+         * {@code local} (default, single-replica/dev) or {@code s3} (S3-compatible object storage,
+         * required for any multi-replica production deployment - see {@link S3} and
+         * docs/DECISIONS.md ADR-014).
+         */
+        private String provider = "local";
+
+        /** Provider-neutral local root, only used when {@link #provider} is {@code local}. */
         private String basePath = "./data/import-files";
+
         /** Максимальный размер вложения, принимаемый ingestion service. */
         private long maxFileSizeBytes = 30L * 1024 * 1024;
+
+        private S3 s3 = new S3();
+
+        private Retention retention = new Retention();
+    }
+
+    /**
+     * S3-compatible backend config (AWS S3, MinIO, etc). All fields are only read when
+     * {@code supplier-import.storage.provider=s3}; the app must keep starting with these all blank
+     * when the {@code local} provider is active (Zabotik commerce rule: optional providers must
+     * never block startup).
+     */
+    @Data
+    public static class S3 {
+        private String bucket = "";
+        private String region = "eu-central-1";
+        /** Override for S3-compatible providers (MinIO, etc); blank uses real AWS S3. */
+        private String endpoint = "";
+        /** Blank uses the default AWS credential provider chain (env/instance profile/etc). */
+        private String accessKeyId = "";
+        private String secretAccessKey = "";
+        /** Required for most non-AWS S3-compatible providers (MinIO); AWS itself ignores this. */
+        private boolean pathStyleAccess = false;
+        /** Prefix prepended to every storage key, so one bucket can be shared across environments. */
+        private String keyPrefix = "";
+    }
+
+    /**
+     * Stage 10 retention policy for {@code import_files}/their blobs and terminal
+     * {@code import_batches} audit rows - see {@code ImportRetentionJob} and
+     * docs/DECISIONS.md ADR-015. Disabled by default: an operator must explicitly opt in to
+     * deleting historical import data.
+     */
+    @Data
+    public static class Retention {
+        private boolean enabled = false;
+        /** How long a terminal batch (APPLIED/QUARANTINED/FAILED, no unresolved rows) is kept before its ImportFile blob is deleted. */
+        private int fileRetentionDays = 180;
+        /** Interval between retention sweep runs. */
+        private long sweepIntervalMs = 24L * 60 * 60 * 1000;
+        /** Delay before the first sweep after startup. */
+        private long sweepInitialDelayMs = 5 * 60 * 1000;
+        /** Upper bound on ImportFiles deleted per sweep, to bound one run's blocking storage calls. */
+        private int maxDeletionsPerSweep = 500;
     }
 
     @Data
@@ -113,26 +165,38 @@ public class SupplierImportProperties {
         private DeepSeek deepseek = new DeepSeek();
     }
 
-    /** provider-neutral: baseUrl/apiKey/model/timeouts только из config/env, никогда в коде. */
+    /**
+     * Provider-neutral: baseUrl/apiKey/model/timeouts только из config/env, никогда в коде.
+     * Backed by a dedicated {@code RestTemplate} bean ({@code DeepSeekClientConfig}), separate from
+     * the app-wide shared client ({@code RestTemplateConfig}) used by Telegram/payments/image search
+     * — a slow or rate-limited DeepSeek account must never borrow/steal timeout budget from (or
+     * impose its own timeout tuning onto) unrelated outbound integrations.
+     */
     @Data
     public static class DeepSeek {
         private String apiKey = "";
-        private String model = "deepseek-chat";
+        private String model = "deepseek-v4-flash";
         private String baseUrl = "https://api.deepseek.com";
-        /**
-         * NOT currently wired to any per-request HTTP timeout - {@code DeepSeekCatalogMatcher}/
-         * {@code DeepSeekSpreadsheetLayoutDetector} both use the single shared {@code RestTemplate}
-         * bean ({@code RestTemplateConfig}, fixed 10s connect / 30s read timeout) that every other
-         * outbound HTTP integration in this app also shares (Telegram, image search, payments).
-         * Changing that shared client's timeout per-caller is out of scope for a supplier-import-only
-         * fix; this field is kept for forward compatibility (a future dedicated DeepSeek
-         * {@code RestTemplate}) but setting it today has no effect - do not rely on it to bound a
-         * slow DeepSeek call, the shared 30s read timeout is what actually applies.
-         */
+        /** TCP connect timeout for the dedicated DeepSeek {@code RestTemplate}. */
+        private int connectTimeoutMs = 5000;
+        /** Read timeout for the dedicated DeepSeek {@code RestTemplate} — bounds one HTTP attempt. */
         private int timeoutMs = 20000;
         /** Повторы только на retryable ошибки (timeout/429/5xx), не на malformed JSON. */
         private int maxRetries = 2;
+        /** Base for exponential backoff between retries; actual sleep also adds random jitter. */
         private long retryBackoffMs = 500;
+        /**
+         * Upper bound on concurrent in-flight DeepSeek HTTP calls (layout detection + catalog
+         * matching share one account/rate limit) across this JVM instance. Protects the account from
+         * being hammered if several batches/rows end up processed concurrently.
+         */
+        private int maxConcurrentRequests = 4;
+        /** How long a call waits for a free concurrency slot before failing fast (retryable). */
+        private long concurrencyAcquireTimeoutMs = 3000;
+        /** Consecutive call failures (after exhausting retries) before the circuit breaker opens. */
+        private int circuitBreakerFailureThreshold = 5;
+        /** Cooldown before an open circuit lets one half-open trial call through. */
+        private long circuitBreakerOpenDurationMs = 30_000L;
     }
 
     /** Safe Apache POI parsing limits, shared by AI sampling, layout preview and full parse. */

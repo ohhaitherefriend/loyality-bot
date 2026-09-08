@@ -17,7 +17,7 @@ import { api, ApiClientError } from '@/api/client'
 import type { Product } from '@/api/types'
 import { useShopStore } from '@/lib/store'
 import { useAuthStore } from '@/lib/auth-store'
-import { formatCurrency, resolveImageUrl, resolveProductImageUrl } from '@/lib/utils'
+import { formatCurrency, resolveProductImageUrl } from '@/lib/utils'
 import { toast } from '@/components/ui/use-toast'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'

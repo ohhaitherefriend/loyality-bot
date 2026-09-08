@@ -105,8 +105,9 @@ public class ImportBatchApplyWriter {
             BigDecimal supplierPrice = normalized.supplierPrice();
             BigDecimal sitePrice = pricingService.calculateSitePrice(supplierPrice, commissionPercent, roundingPolicy);
 
-            Optional<SupplierOffer> existingOpt =
-                    supplierOfferRepository.findByShopIdAndSupplierIdAndProductId(shopId, supplier.getId(), product.getId());
+            Optional<SupplierOffer> existingOpt = supplierOfferRepository
+                    .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(
+                            shopId, supplier.getId(), source.getSnapshotScope(), product.getId());
             LocalDateTime now = LocalDateTime.now();
             if (existingOpt.isPresent()) {
                 SupplierOffer existing = existingOpt.get();
@@ -117,11 +118,10 @@ public class ImportBatchApplyWriter {
                 existing.setAppliedCommissionPercent(commissionPercent);
                 existing.setCalculatedSitePrice(sitePrice);
                 existing.setStockQuantity(normalized.stock());
-                // Keep scope attribution current: if this product is now supplied via a different
-                // SupplierSource of the same supplier (e.g. moved between category files), the offer
-                // must follow it, otherwise findStaleActiveOffersInScope's live join to
-                // offer.supplierSource.snapshotScope keeps pointing at the stale source and a FULL
-                // apply from that stale source's scope would wrongly deactivate this still-live offer.
+                // The offer's identity (shop+supplier+snapshotScope+product) never changes here -
+                // only which SupplierSource most recently wrote it, so that several transport
+                // sources sharing one scope (e.g. a re-sent duplicate file under a new source
+                // record) keep updating the same logical offer instead of creating a duplicate.
                 existing.setSupplierSource(source);
                 if (normalized.externalSku() != null) {
                     existing.setExternalSku(normalized.externalSku());
@@ -147,6 +147,7 @@ public class ImportBatchApplyWriter {
                         .shopId(shopId)
                         .supplier(supplier)
                         .supplierSource(source)
+                        .snapshotScope(source.getSnapshotScope())
                         .product(product)
                         .externalSku(normalized.externalSku())
                         .barcode(normalized.barcode())

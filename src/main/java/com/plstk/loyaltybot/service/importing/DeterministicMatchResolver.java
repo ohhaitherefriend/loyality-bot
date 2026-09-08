@@ -11,10 +11,14 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Runs the deterministic matching stage order from docs/ARCHITECTURE.md §9.2/prompt 04, in order:
+ * Runs the deterministic matching stage order from docs/ARCHITECTURE.md §9.2/prompt 04 (Stage 4
+ * production-hardening pass), in order:
  * <ol>
  *   <li>{@code SupplierProductLink} (supplier+SKU, supplier+barcode, or shop+fingerprint)</li>
  *   <li>exact, unique barcode against the catalog (no link needed)</li>
+ *   <li>exact, unique {@code supplierArticle} against the catalog (no link needed - covers a
+ *       supplier's very first batch against a product already catalogued with this same article by a
+ *       legacy manual import)</li>
  *   <li>safe fingerprint against the catalog (exact structural match, no critical conflict)</li>
  *   <li>otherwise: top explainable fuzzy candidates, never auto-matched</li>
  * </ol>
@@ -58,6 +62,11 @@ public class DeterministicMatchResolver {
         Optional<MatchResolution> barcodeMatch = resolveViaExactBarcode(shopId, row);
         if (barcodeMatch.isPresent()) {
             return barcodeMatch.get();
+        }
+
+        Optional<MatchResolution> articleMatch = resolveViaExactSupplierArticle(shopId, row);
+        if (articleMatch.isPresent()) {
+            return articleMatch.get();
         }
 
         List<ScoredCandidate> scored = candidateSearchService.search(shopId, row);
@@ -114,6 +123,29 @@ public class DeterministicMatchResolver {
         List<Product> matches = productRepository.findAllByShopIdAndBarcode(shopId, row.barcode());
         if (matches.size() != 1) {
             // 0 -> no match; >1 -> duplicate barcode data anomaly, never auto-pick one.
+            return Optional.empty();
+        }
+        Product candidate = matches.get(0);
+        NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
+        List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
+        if (!conflicts.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(MatchResolution.resolved(candidate.getId(), MatchDecisionType.EXACT));
+    }
+
+    /**
+     * "Действительно стабильный идентификатор" is operationalized the same way barcode is: unique
+     * within the shop AND clear of critical attribute conflicts (volume/concentration/shade/
+     * tester/set) against the row - a coincidental article-number collision with a completely
+     * different product is rejected instead of silently trusted.
+     */
+    private Optional<MatchResolution> resolveViaExactSupplierArticle(String shopId, NormalizedRowData row) {
+        if (row.externalSku() == null || row.externalSku().isBlank()) {
+            return Optional.empty();
+        }
+        List<Product> matches = productRepository.findAllByShopIdAndSupplierArticle(shopId, row.externalSku());
+        if (matches.size() != 1) {
             return Optional.empty();
         }
         Product candidate = matches.get(0);

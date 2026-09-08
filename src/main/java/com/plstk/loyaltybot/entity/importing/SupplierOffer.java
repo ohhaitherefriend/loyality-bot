@@ -19,9 +19,19 @@ import java.time.LocalDateTime;
 @Table(name = "supplier_offers", indexes = {
     @Index(name = "idx_supplier_offers_shop_id", columnList = "shopId"),
     @Index(name = "idx_supplier_offers_shop_product_active", columnList = "shopId, product_id, active"),
-    @Index(name = "idx_supplier_offers_shop_source", columnList = "shopId, supplier_source_id")
+    @Index(name = "idx_supplier_offers_shop_source", columnList = "shopId, supplier_source_id"),
+    @Index(name = "idx_supplier_offers_shop_supplier_scope", columnList = "shopId, supplier_id, snapshotScope")
 }, uniqueConstraints = {
-    @UniqueConstraint(name = "uk_supplier_offers_shop_supplier_product", columnNames = {"shopId", "supplier_id", "product_id"})
+    // Stage 3 identity fix: a bare (shop, supplier, product) key made two independent
+    // snapshotScopes of the same supplier collide onto ONE row, so whichever file was applied
+    // last silently "stole" the offer and made the other scope's FULL reconciliation blind to it
+    // (see ImportBatchApplyWriter/SupplierOfferRepository). The persisted `snapshotScope` below
+    // widens identity to (shop, supplier, snapshotScope, product): several transport sources that
+    // share one scope (e.g. a re-sent duplicate file) still upsert the same logical offer, but two
+    // different scopes of the same supplier now always get distinct rows and never deactivate each
+    // other's offers.
+    @UniqueConstraint(name = "uk_supplier_offers_shop_supplier_scope_product",
+            columnNames = {"shopId", "supplier_id", "snapshotScope", "product_id"})
 })
 @Data
 @Builder
@@ -43,6 +53,17 @@ public class SupplierOffer {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "supplier_source_id", nullable = false)
     private SupplierSource supplierSource;
+
+    /**
+     * Snapshot scope this offer belongs to, copied from {@code supplierSource.snapshotScope} at
+     * write time (NOT a live join - see the class javadoc and the unique constraint above). Part of
+     * the offer's identity: reassigning a {@link SupplierSource} to a different scope after offers
+     * already exist must never retroactively change which offers a past/future FULL apply of the
+     * old scope is allowed to see or deactivate.
+     */
+    @Column(nullable = false, length = 255)
+    @Builder.Default
+    private String snapshotScope = "SUPPLIER_ALL";
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "product_id", nullable = false)

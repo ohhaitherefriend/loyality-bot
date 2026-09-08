@@ -1,0 +1,12 @@
+-- V28: Stage 10 retention (docs/DECISIONS.md ADR-015).
+--
+-- storage_deleted_at tracks when ImportRetentionJob deleted the underlying blob from
+-- ImportFileStorage (local disk or S3) for a terminal batch older than the configured retention
+-- window. The ImportFile metadata row itself is NEVER deleted - only the blob - so the audit trail
+-- (which file, which supplier, when it was received) survives forever even after its bytes are
+-- gone. NULL means the blob still exists (or retention is disabled/hasn't reached this file yet).
+--
+-- IF NOT EXISTS: same fresh-install-vs-V0-baseline reasoning as every other ADD COLUMN since V9
+-- (Stage 6/ADR-013) - V0's Hibernate-generated baseline already includes this column for anyone
+-- migrating from V1, so this must be a no-op there.
+ALTER TABLE import_files ADD COLUMN IF NOT EXISTS storage_deleted_at TIMESTAMP NULL;

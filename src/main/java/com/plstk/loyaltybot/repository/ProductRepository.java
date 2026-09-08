@@ -37,11 +37,42 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
     List<Product> findAllByShopIdAndBarcode(String shopId, String barcode);
 
     /**
+     * Stage 4 deterministic matching step 3: exact supplier-article match against the catalog's own
+     * {@code supplierArticle} column, for a supplier's very first batch before any {@code
+     * SupplierProductLink} exists yet (e.g. the product was originally catalogued by a legacy manual
+     * XLSX import - {@code ProductImportService} - that already recorded this same article). Like
+     * {@link #findAllByShopIdAndBarcode}, returns every match instead of throwing: an ambiguous
+     * (non-unique) article is a data anomaly that must fall through to fuzzy search, never be
+     * auto-picked.
+     */
+    List<Product> findAllByShopIdAndSupplierArticle(String shopId, String supplierArticle);
+
+    /**
      * Bounded shop-scoped candidate pool for {@code SimpleProductCandidateFetcher}: deliberately not
      * filtered by visible/active, since a previously-deactivated or hidden product must still be
-     * matchable (it can be reactivated by a reappearing supplier offer per D-006).
+     * matchable (it can be reactivated by a reappearing supplier offer per D-006). Stage 4: used only
+     * as a last-resort backfill when the brand/name-token shortlist below returns fewer than the
+     * configured limit - never the primary candidate source, since "first N by id" silently hides
+     * every product beyond the Nth row of a large catalog.
      */
     List<Product> findByShopIdOrderByIdAsc(String shopId, Pageable pageable);
+
+    /**
+     * Stage 4 candidate shortlist, step 1: every product whose {@code brand} exactly matches one of
+     * the caller's already-normalized/alias-expanded/transliterated brand tokens - found by content,
+     * never by row id, so a matching brand at id 50000 in a 100000-row catalog is always reachable.
+     */
+    @Query("SELECT p FROM Product p WHERE p.shopId = :shopId AND LOWER(p.brand) IN :brandTokens ORDER BY p.id ASC")
+    List<Product> findByShopIdAndBrandTokenIn(
+            @Param("shopId") String shopId, @Param("brandTokens") java.util.Collection<String> brandTokens, Pageable pageable);
+
+    /**
+     * Stage 4 candidate shortlist, step 2: a name-substring shortlist (portable {@code LIKE}, no
+     * {@code pg_trgm} dependency) used to widen the pool beyond an exact/aliased brand match - e.g. a
+     * supplier's typo'd brand ("Diorr") still surfaces the real catalog product when the row and
+     * product names otherwise overlap on a distinctive word.
+     */
+    List<Product> findByShopIdAndNameContainingIgnoreCase(String shopId, String nameToken, Pageable pageable);
 
     /**
      * PostgreSQL-only candidate pool for {@code TrigramProductCandidateFetcher}, requiring the

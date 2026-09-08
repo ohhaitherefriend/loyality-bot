@@ -1,24 +1,37 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock,
+  GraduationCap,
   Loader2,
   Mail,
+  Pencil,
   Plug,
   Plus,
   RefreshCw,
+  Tags,
+  Trash2,
   Upload,
   XCircle,
 } from 'lucide-react'
 
 import { api, ApiClientError } from '@/api/client'
-import type { MailAuthMode, Supplier, SupplierSource } from '@/api/types'
+import type {
+  BrandAlias,
+  MailAuthMode,
+  PriceRoundingPolicy,
+  SnapshotMode,
+  Supplier,
+  SupplierSource,
+  UpdateSupplierSourceRequest,
+} from '@/api/types'
 import { useShopStore } from '@/lib/store'
 import { formatDateTime, formatRelativeTime } from '@/lib/utils'
 import { toast } from '@/components/ui/use-toast'
 
-import { Alert, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -78,6 +91,7 @@ export function MailboxesPage() {
   const [manualUploadOpen, setManualUploadOpen] = useState(false)
   const [uploadSourceId, setUploadSourceId] = useState<string>('')
   const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [editSourceId, setEditSourceId] = useState<number | null>(null)
 
   const mailboxesQuery = useQuery({
     queryKey: ['mailboxes', shopId],
@@ -93,6 +107,11 @@ export function MailboxesPage() {
   const sourcesQuery = useQuery({
     queryKey: ['supplierSources', shopId],
     queryFn: () => api.listSupplierSources(shopId!),
+    enabled: !!shopId,
+  })
+  const brandAliasesQuery = useQuery({
+    queryKey: ['brandAliases', shopId],
+    queryFn: () => api.listBrandAliases(shopId!),
     enabled: !!shopId,
   })
 
@@ -182,6 +201,69 @@ export function MailboxesPage() {
     },
   })
 
+  const updateSourceMutation = useMutation({
+    mutationFn: ({ sourceId, request }: { sourceId: number; request: UpdateSupplierSourceRequest }) =>
+      api.updateSupplierSource(shopId!, sourceId, request),
+    onSuccess: () => {
+      toast({ title: 'Источник обновлён' })
+      setEditSourceId(null)
+      queryClient.invalidateQueries({ queryKey: ['supplierSources', shopId] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: 'Не удалось обновить источник',
+        description: error instanceof ApiClientError ? error.message : 'Неизвестная ошибка',
+        variant: 'destructive',
+      })
+    },
+  })
+
+  const graduateSourceMutation = useMutation({
+    mutationFn: (sourceId: number) => api.graduateSupplierSource(shopId!, sourceId, true),
+    onSuccess: () => {
+      toast({ title: 'Источник переведён в боевой режим', description: 'Shadow mode выключен, auto-apply включён' })
+      setEditSourceId(null)
+      queryClient.invalidateQueries({ queryKey: ['supplierSources', shopId] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: 'Не удалось активировать источник',
+        description: error instanceof ApiClientError ? error.message : 'Неизвестная ошибка',
+        variant: 'destructive',
+      })
+    },
+  })
+
+  const createBrandAliasMutation = useMutation({
+    mutationFn: api.createBrandAlias.bind(api),
+    onSuccess: () => {
+      toast({ title: 'Алиас бренда добавлен' })
+      queryClient.invalidateQueries({ queryKey: ['brandAliases', shopId] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: 'Не удалось добавить алиас',
+        description: error instanceof ApiClientError ? error.message : 'Неизвестная ошибка',
+        variant: 'destructive',
+      })
+    },
+  })
+
+  const deleteBrandAliasMutation = useMutation({
+    mutationFn: (aliasId: number) => api.deleteBrandAlias(shopId!, aliasId),
+    onSuccess: () => {
+      toast({ title: 'Алиас удалён' })
+      queryClient.invalidateQueries({ queryKey: ['brandAliases', shopId] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        title: 'Не удалось удалить алиас',
+        description: error instanceof ApiClientError ? error.message : 'Неизвестная ошибка',
+        variant: 'destructive',
+      })
+    },
+  })
+
   const manualUploadMutation = useMutation({
     mutationFn: ({ sourceId, file }: { sourceId: number; file: File }) =>
       api.uploadSupplierPrice(shopId!, sourceId, file),
@@ -219,6 +301,7 @@ export function MailboxesPage() {
   const mailboxes = mailboxesQuery.data ?? []
   const suppliers = suppliersQuery.data ?? []
   const sources = sourcesQuery.data ?? []
+  const brandAliases = brandAliasesQuery.data ?? []
 
   return (
     <div className="space-y-6">
@@ -601,22 +684,425 @@ export function MailboxesPage() {
           {sources.map((source: SupplierSource) => (
             <div key={source.id} className="rounded-lg border p-3 space-y-1">
               <div className="flex items-center justify-between">
-                <span className="font-medium">{source.label}</span>
-                <Badge variant="secondary">{source.supplierName}</Badge>
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{source.label}</span>
+                  <Badge variant="secondary">{source.supplierName}</Badge>
+                  {!source.enabled && <Badge variant="secondary">Отключён</Badge>}
+                </div>
+                <Button size="sm" variant="outline" onClick={() => setEditSourceId(source.id)}>
+                  <Pencil className="h-4 w-4 mr-1" /> Настроить
+                </Button>
               </div>
               <div className="text-sm text-muted-foreground space-y-0.5">
                 {source.senderAllowlist && <div>Отправители: {source.senderAllowlist.replace(/\n/g, ', ')}</div>}
                 {source.subjectPattern && <div>Тема: /{source.subjectPattern}/</div>}
                 {source.filenamePattern && <div>Файл: /{source.filenamePattern}/</div>}
                 <div className="flex items-center gap-2 pt-1">
-                  <Switch checked={source.shadowMode} disabled />
-                  <span>Shadow mode (без auto-apply)</span>
+                  <Badge variant={source.shadowMode ? 'secondary' : 'success'}>
+                    {source.shadowMode ? 'Shadow mode' : 'Боевой режим'}
+                  </Badge>
+                  <Badge variant={source.autoApply ? 'success' : 'secondary'}>
+                    Auto-apply: {source.autoApply ? 'включён' : 'выключен'}
+                  </Badge>
+                  <Badge variant="outline">{source.snapshotMode} · {source.snapshotScope}</Badge>
+                  {source.commissionPercentOverride != null && (
+                    <Badge variant="outline">Комиссия: {source.commissionPercentOverride}%</Badge>
+                  )}
                 </div>
               </div>
             </div>
           ))}
         </CardContent>
       </Card>
+
+      {/* ===== Brand aliases (Stage 4 matching) ===== */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Tags className="h-5 w-5" /> Алиасы брендов
+          </CardTitle>
+          <CardDescription>
+            Разные написания одного бренда (опечатки, транслитерация, кириллица/латиница) для
+            подбора кандидатов при сопоставлении. Например: Chanel / Шанель / Channel.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              const form = new FormData(e.currentTarget)
+              const canonicalBrand = String(form.get('canonicalBrand') || '').trim()
+              const alias = String(form.get('alias') || '').trim()
+              if (!canonicalBrand || !alias) {
+                toast({ title: 'Укажите канонический бренд и алиас', variant: 'destructive' })
+                return
+              }
+              createBrandAliasMutation.mutate({ canonicalBrand, alias }, {
+                onSuccess: () => (e.currentTarget as HTMLFormElement).reset(),
+              })
+            }}
+          >
+            <div>
+              <Label htmlFor="canonicalBrand">Канонический бренд</Label>
+              <Input id="canonicalBrand" name="canonicalBrand" placeholder="Chanel" required />
+            </div>
+            <div>
+              <Label htmlFor="alias">Алиас</Label>
+              <Input id="alias" name="alias" placeholder="Шанель" required />
+            </div>
+            <Button type="submit" size="sm" disabled={createBrandAliasMutation.isPending}>
+              {createBrandAliasMutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4 mr-1" />
+              )}
+              Добавить
+            </Button>
+          </form>
+          <Separator />
+          {brandAliases.length === 0 && (
+            <p className="text-sm text-muted-foreground">Алиасов пока нет — добавьте первую группу выше.</p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {brandAliases.map((alias: BrandAlias) => (
+              <Badge key={alias.id} variant="outline" className="flex items-center gap-1.5 py-1.5">
+                <span className="font-medium">{alias.canonicalBrand}</span>
+                <span className="text-muted-foreground">↔ {alias.alias}</span>
+                <button
+                  type="button"
+                  className="ml-1 text-muted-foreground hover:text-destructive"
+                  disabled={deleteBrandAliasMutation.isPending}
+                  onClick={() => deleteBrandAliasMutation.mutate(alias.id)}
+                  aria-label={`Удалить алиас ${alias.alias}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </Badge>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      <EditSourceDialog
+        source={sources.find((s) => s.id === editSourceId) ?? null}
+        mailboxes={mailboxes}
+        open={editSourceId != null}
+        onOpenChange={(open) => !open && setEditSourceId(null)}
+        onSave={(request) => updateSourceMutation.mutate({ sourceId: editSourceId!, request })}
+        onGraduate={() => graduateSourceMutation.mutate(editSourceId!)}
+        saving={updateSourceMutation.isPending}
+        graduating={graduateSourceMutation.isPending}
+      />
     </div>
+  )
+}
+
+function EditSourceDialog({
+  source,
+  mailboxes,
+  open,
+  onOpenChange,
+  onSave,
+  onGraduate,
+  saving,
+  graduating,
+}: {
+  source: SupplierSource | null
+  mailboxes: Array<{ id: number; label: string }>
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onSave: (request: UpdateSupplierSourceRequest) => void
+  onGraduate: () => void
+  saving: boolean
+  graduating: boolean
+}) {
+  const [confirmGraduateOpen, setConfirmGraduateOpen] = useState(false)
+  const [confirmAutoApplyOpen, setConfirmAutoApplyOpen] = useState(false)
+  const [pendingAutoApplyRequest, setPendingAutoApplyRequest] = useState<UpdateSupplierSourceRequest | null>(null)
+
+  if (!source) {
+    return null
+  }
+
+  function submit(form: FormData) {
+    const autoApply = form.get('autoApply') === 'on'
+    const shadowMode = form.get('shadowMode') === 'on'
+    const request: UpdateSupplierSourceRequest = {
+      expectedVersion: source!.version,
+      label: String(form.get('label') || source!.label),
+      mailboxConnectionId: form.get('mailboxConnectionId') ? Number(form.get('mailboxConnectionId')) : undefined,
+      clearMailboxConnectionId: !form.get('mailboxConnectionId'),
+      senderAllowlist: String(form.get('senderAllowlist') || ''),
+      subjectPattern: String(form.get('subjectPattern') || ''),
+      filenamePattern: String(form.get('filenamePattern') || ''),
+      enabled: form.get('enabled') === 'on',
+      snapshotMode: form.get('snapshotMode') as SnapshotMode,
+      snapshotScope: String(form.get('snapshotScope') || 'SUPPLIER_ALL'),
+      commissionPercentOverride: form.get('commissionPercentOverride')
+        ? Number(form.get('commissionPercentOverride'))
+        : undefined,
+      clearCommissionPercentOverride: !form.get('commissionPercentOverride'),
+      roundingPolicy: form.get('roundingPolicy') as PriceRoundingPolicy,
+      shadowMode,
+      autoApply,
+      confirmAutoApply: autoApply && !source!.autoApply ? true : undefined,
+      aiAutoApproveMinScoreOverride: form.get('aiAutoApproveMinScoreOverride')
+        ? Number(form.get('aiAutoApproveMinScoreOverride'))
+        : undefined,
+      clearAiAutoApproveMinScoreOverride: !form.get('aiAutoApproveMinScoreOverride'),
+      aiMinConfidenceOverride: form.get('aiMinConfidenceOverride')
+        ? Number(form.get('aiMinConfidenceOverride'))
+        : undefined,
+      clearAiMinConfidenceOverride: !form.get('aiMinConfidenceOverride'),
+    }
+
+    if (autoApply && !source!.autoApply) {
+      setPendingAutoApplyRequest(request)
+      setConfirmAutoApplyOpen(true)
+      return
+    }
+    onSave(request)
+  }
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Настройки источника «{source.label}»</DialogTitle>
+            <DialogDescription>
+              Комиссия, snapshot-политика, автоматизация и фильтры почты для этого источника.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault()
+              submit(new FormData(e.currentTarget))
+            }}
+          >
+            <div>
+              <Label htmlFor="edit-label">Название источника</Label>
+              <Input id="edit-label" name="label" defaultValue={source.label} required />
+            </div>
+            <div>
+              <Label htmlFor="edit-mailboxConnectionId">Почтовый ящик</Label>
+              <Select name="mailboxConnectionId" defaultValue={source.mailboxConnectionId ? String(source.mailboxConnectionId) : ''}>
+                <SelectTrigger id="edit-mailboxConnectionId">
+                  <SelectValue placeholder="Не привязан" />
+                </SelectTrigger>
+                <SelectContent>
+                  {mailboxes.map((m) => (
+                    <SelectItem key={m.id} value={String(m.id)}>{m.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label htmlFor="edit-senderAllowlist">Разрешённые отправители</Label>
+              <Textarea id="edit-senderAllowlist" name="senderAllowlist" defaultValue={source.senderAllowlist ?? ''} />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Для auto-apply нужен хотя бы один точный email — обычный заголовок From легко подделать.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="edit-subjectPattern">Regex темы</Label>
+                <Input id="edit-subjectPattern" name="subjectPattern" defaultValue={source.subjectPattern ?? ''} />
+              </div>
+              <div>
+                <Label htmlFor="edit-filenamePattern">Regex имени файла</Label>
+                <Input id="edit-filenamePattern" name="filenamePattern" defaultValue={source.filenamePattern ?? ''} />
+              </div>
+            </div>
+            <Separator />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="edit-snapshotMode">Snapshot</Label>
+                <Select name="snapshotMode" defaultValue={source.snapshotMode}>
+                  <SelectTrigger id="edit-snapshotMode">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="FULL">FULL (полный ассортимент)</SelectItem>
+                    <SelectItem value="DELTA">DELTA (только изменения)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label htmlFor="edit-snapshotScope">Snapshot scope</Label>
+                <Input id="edit-snapshotScope" name="snapshotScope" defaultValue={source.snapshotScope} required />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="edit-commissionPercentOverride">Комиссия, % (опц.)</Label>
+                <Input
+                  id="edit-commissionPercentOverride"
+                  name="commissionPercentOverride"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  defaultValue={source.commissionPercentOverride ?? ''}
+                  placeholder="Использовать умолчание магазина"
+                />
+              </div>
+              <div>
+                <Label htmlFor="edit-roundingPolicy">Округление</Label>
+                <Select name="roundingPolicy" defaultValue={source.roundingPolicy}>
+                  <SelectTrigger id="edit-roundingPolicy">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="WHOLE_UNIT_HALF_UP">До целых (округление)</SelectItem>
+                    <SelectItem value="NO_ROUNDING">Без округления</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="edit-aiAutoApproveMinScoreOverride">AI: мин. score (0..1, опц.)</Label>
+                <Input
+                  id="edit-aiAutoApproveMinScoreOverride"
+                  name="aiAutoApproveMinScoreOverride"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="1"
+                  defaultValue={source.aiAutoApproveMinScoreOverride ?? ''}
+                />
+              </div>
+              <div>
+                <Label htmlFor="edit-aiMinConfidenceOverride">AI: мин. confidence (0..1, опц.)</Label>
+                <Input
+                  id="edit-aiMinConfidenceOverride"
+                  name="aiMinConfidenceOverride"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="1"
+                  defaultValue={source.aiMinConfidenceOverride ?? ''}
+                />
+              </div>
+            </div>
+            <Separator />
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <Label htmlFor="edit-enabled">Источник включён</Label>
+                <p className="text-xs text-muted-foreground">Выключенный источник не принимает новые письма/файлы.</p>
+              </div>
+              <Switch id="edit-enabled" name="enabled" defaultChecked={source.enabled} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <Label htmlFor="edit-shadowMode">Shadow mode</Label>
+                <p className="text-xs text-muted-foreground">Решения считаются, но каталог не изменяется.</p>
+              </div>
+              <Switch id="edit-shadowMode" name="shadowMode" defaultChecked={source.shadowMode} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <Label htmlFor="edit-autoApply">Auto-apply</Label>
+                <p className="text-xs text-muted-foreground">
+                  Автоматическое применение безопасных batch без ручного подтверждения.
+                </p>
+              </div>
+              <Switch id="edit-autoApply" name="autoApply" defaultChecked={source.autoApply} />
+            </div>
+
+            {source.shadowMode && (
+              <Alert>
+                <GraduationCap className="h-4 w-4" />
+                <AlertTitle>Рекомендуемый путь для нового поставщика</AlertTitle>
+                <AlertDescription>
+                  Вместо ручного переключения используйте «Перевести в боевой режим» ниже — эта операция
+                  дополнительно проверяет, что хотя бы один shadow-прогон прошёл успешно и нет открытых
+                  QUARANTINED/FAILED партий или строк NEEDS_REVIEW.
+                  <div className="mt-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={graduating}
+                      onClick={() => setConfirmGraduateOpen(true)}
+                    >
+                      {graduating ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <GraduationCap className="mr-1 h-4 w-4" />}
+                      Перевести в боевой режим
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            <DialogFooter>
+              <Button type="submit" disabled={saving}>
+                {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Сохранить
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmGraduateOpen} onOpenChange={setConfirmGraduateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" /> Подтвердите переход в боевой режим
+            </DialogTitle>
+            <DialogDescription>
+              Shadow mode будет выключен, auto-apply включён. Следующий FULL snapshot этого источника
+              автоматически скроет с сайта товары, которых больше нет в прайс-листе. Убедитесь, что вы
+              проверили shadow-прогоны и очередь исключений для этого источника.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmGraduateOpen(false)}>Отмена</Button>
+            <Button
+              variant="destructive"
+              disabled={graduating}
+              onClick={() => {
+                setConfirmGraduateOpen(false)
+                onGraduate()
+              }}
+            >
+              {graduating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Да, перевести в боевой режим
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmAutoApplyOpen} onOpenChange={setConfirmAutoApplyOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" /> Включить auto-apply?
+            </DialogTitle>
+            <DialogDescription>
+              Auto-apply означает, что безопасные партии будут применяться к каталогу без ручного
+              подтверждения. Для FULL snapshot это включает автоматическое скрытие товаров, пропавших
+              из прайс-листа. Продолжить?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmAutoApplyOpen(false)}>Отмена</Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setConfirmAutoApplyOpen(false)
+                if (pendingAutoApplyRequest) {
+                  onSave(pendingAutoApplyRequest)
+                }
+              }}
+            >
+              Да, включить auto-apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

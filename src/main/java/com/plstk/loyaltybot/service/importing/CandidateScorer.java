@@ -36,7 +36,7 @@ public class CandidateScorer {
         this.conflictChecker = conflictChecker;
     }
 
-    public ScoredCandidate score(Long productId, String productName, NormalizedRowData row, NormalizedRowData candidate) {
+    public ScoredCandidate score(String shopId, Long productId, String productName, NormalizedRowData row, NormalizedRowData candidate) {
         Map<String, BigDecimal> components = new LinkedHashMap<>();
         List<String> matchedAttributes = new ArrayList<>();
 
@@ -47,7 +47,7 @@ public class CandidateScorer {
         if (equalsIgnoreCase(row.brand(), candidate.brand())) {
             brandBonus = BRAND_EXACT_BONUS;
             matchedAttributes.add("brand");
-        } else if (brandAliasResolver.areAliases(row.brand(), candidate.brand())) {
+        } else if (brandAliasResolver.areAliases(shopId, row.brand(), candidate.brand())) {
             brandBonus = BRAND_ALIAS_BONUS;
             matchedAttributes.add("brandAlias");
         }

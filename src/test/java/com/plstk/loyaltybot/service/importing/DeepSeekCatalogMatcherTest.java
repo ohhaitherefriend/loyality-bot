@@ -53,8 +53,10 @@ class DeepSeekCatalogMatcherTest {
         properties.getAi().getDeepseek().setApiKey("test-key");
         properties.getAi().getDeepseek().setMaxRetries(2);
         properties.getAi().getDeepseek().setRetryBackoffMs(1); // keep tests fast
-        matcher = new DeepSeekCatalogMatcher(
-                properties, restTemplate, new ObjectMapper(), new SupplierImportMetrics(new SimpleMeterRegistry()));
+        SupplierImportMetrics metrics = new SupplierImportMetrics(new SimpleMeterRegistry());
+        DeepSeekHttpClient httpClient = new DeepSeekHttpClient(
+                properties, restTemplate, new ObjectMapper(), metrics, new DeepSeekCircuitBreaker());
+        matcher = new DeepSeekCatalogMatcher(properties, httpClient, new ObjectMapper(), metrics);
     }
 
     @Test

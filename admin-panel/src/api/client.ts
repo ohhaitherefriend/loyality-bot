@@ -45,6 +45,9 @@ import type {
   CreateSupplierRequest,
   SupplierSource,
   CreateSupplierSourceRequest,
+  UpdateSupplierSourceRequest,
+  BrandAlias,
+  CreateBrandAliasRequest,
   ImportDashboardResponse,
   PageResponse,
   RowExceptionSummary,
@@ -546,6 +549,43 @@ class ApiClient {
     })
   }
 
+  async updateSupplierSource(
+    shopId: string,
+    sourceId: number,
+    request: UpdateSupplierSourceRequest
+  ): Promise<SupplierSource> {
+    return this.request<SupplierSource>(`/api/shops/${shopId}/supplier-sources/${sourceId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async graduateSupplierSource(shopId: string, sourceId: number, confirm: boolean): Promise<SupplierSource> {
+    return this.request<SupplierSource>(`/api/shops/${shopId}/supplier-sources/${sourceId}/graduate`, {
+      method: 'POST',
+      body: JSON.stringify({ confirm }),
+    })
+  }
+
+  // ========== Brand aliases (Stage 4) ==========
+
+  async listBrandAliases(shopId: string): Promise<BrandAlias[]> {
+    return this.request<BrandAlias[]>(`/api/shops/${shopId}/brand-aliases`)
+  }
+
+  async createBrandAlias(shopId: string, request: CreateBrandAliasRequest): Promise<BrandAlias> {
+    return this.request<BrandAlias>(`/api/shops/${shopId}/brand-aliases`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  async deleteBrandAlias(shopId: string, aliasId: number): Promise<void> {
+    await this.request<void>(`/api/shops/${shopId}/brand-aliases/${aliasId}`, {
+      method: 'DELETE',
+    })
+  }
+
   async uploadSupplierPrice(
     shopId: string,
     supplierSourceId: number,
@@ -634,6 +674,15 @@ class ApiClient {
 
   async resumeBatch(shopId: string, batchId: number): Promise<{ batchId: number; status: ImportBatchStatus }> {
     return this.request(`/api/shops/${shopId}/operations/batches/${batchId}/resume`, {
+      method: 'POST',
+    })
+  }
+
+  async approveBatch(
+    shopId: string,
+    batchId: number
+  ): Promise<{ batchId: number; status: ImportBatchStatus; approvedByUserId?: number; approvedByEmail?: string; approvedAt?: string }> {
+    return this.request(`/api/shops/${shopId}/operations/batches/${batchId}/approve`, {
       method: 'POST',
     })
   }

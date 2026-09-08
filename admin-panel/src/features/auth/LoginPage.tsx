@@ -22,7 +22,7 @@ type LoginFormData = z.infer<typeof loginSchema>
 
 export function LoginPage() {
   const navigate = useNavigate()
-  const { login, isLoading, error, clearError, needsOnboarding } = useAuthStore()
+  const { login, isLoading, error, clearError } = useAuthStore()
   const [showError, setShowError] = useState(false)
 
   const form = useForm<LoginFormData>({

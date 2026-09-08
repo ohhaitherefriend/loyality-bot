@@ -5,43 +5,102 @@ import com.plstk.loyaltybot.repository.ProductRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Default, portable candidate fetcher: plain JPQL, shop-scoped, bounded by
+ * Default, portable candidate fetcher: plain JPQL/derived queries, shop-scoped, bounded by
  * {@code supplier-import.matching.candidate-fetch-limit}. Works identically on H2 (tests/dev) and
- * PostgreSQL (prod) without requiring the {@code pg_trgm} extension, so the whole normalization +
- * candidate search pipeline is fully testable without Docker/Testcontainers. Wired in unless
+ * PostgreSQL (prod) without requiring the {@code pg_trgm} extension. Wired in unless
  * {@code supplier-import.matching.pg-trgm-enabled=true} selects {@link TrigramProductCandidateFetcher}
  * instead (see {@code CandidateFetcherConfig}).
+ *
+ * <p>Stage 4 fix: the original implementation returned the first {@code limit} products ordered by
+ * id, regardless of the row being matched - for any catalog bigger than that limit, a product whose
+ * id happened to fall outside the window was permanently unreachable by fuzzy/AI matching, silently
+ * causing missed matches and duplicate {@code NEW_PRODUCT}s. Candidates are now shortlisted BY
+ * CONTENT: brand (exact + {@link BrandAliasResolver alias/transliteration}-expanded) first, then a
+ * name-substring widening, and only backfilled with the old id-ordered pool if that still leaves
+ * room under {@code limit} (e.g. a row with neither a usable brand nor name token).
  */
 @Component
 public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
 
     /**
-     * The query below depends only on {@code (shopId, limit)}, never on {@code row} - every row in
-     * a batch would otherwise trigger an identical "SELECT ... FROM products WHERE shop_id = ?
-     * ORDER BY id LIMIT ?" query (a several-thousand-row batch issuing several thousand identical
-     * queries). Cached per shop for the duration of one batch's row loop only - {@link
-     * ImportBatchNormalizingService#normalizeBatch} evicts this shop's entry via {@link
-     * #invalidateForNewBatch} before the loop starts, so every batch always sees a fresh catalog
-     * snapshot (e.g. a NEW_PRODUCT created by an earlier batch for the same shop) and no test using a
-     * fixed shopId can leak a stale result into a later, unrelated test/batch.
+     * Cache key includes the row's own brand/name signal (unlike the pre-Stage-4 version, which
+     * cached one shop-wide list reused by every row): the shortlist is now content-dependent, but
+     * many rows in one supplier file typically share a brand, so this still avoids re-querying per
+     * row. Evicted per shop at the start of every batch (see {@link #invalidateForNewBatch}) and,
+     * indirectly, whenever {@code BrandAliasResolver}'s own per-shop index is invalidated (alias data
+     * changing mid-batch is not a supported scenario).
      */
     private final ConcurrentHashMap<CacheKey, List<Product>> cache = new ConcurrentHashMap<>();
 
     private final ProductRepository productRepository;
+    private final BrandAliasResolver brandAliasResolver;
+    private final BrandNormalizer brandNormalizer;
 
-    public SimpleProductCandidateFetcher(ProductRepository productRepository) {
+    public SimpleProductCandidateFetcher(
+            ProductRepository productRepository, BrandAliasResolver brandAliasResolver, BrandNormalizer brandNormalizer) {
         this.productRepository = productRepository;
+        this.brandAliasResolver = brandAliasResolver;
+        this.brandNormalizer = brandNormalizer;
     }
 
     @Override
     public List<Product> fetchCandidates(String shopId, NormalizedRowData row, int limit) {
-        CacheKey key = new CacheKey(shopId, limit);
-        return cache.computeIfAbsent(key,
-                k -> productRepository.findByShopIdOrderByIdAsc(k.shopId(), PageRequest.of(0, k.limit())));
+        Set<String> brandTokens = row.brand() != null ? brandAliasResolver.expand(shopId, row.brand()) : Set.of();
+        String nameToken = longestToken(row.searchName());
+        CacheKey key = new CacheKey(shopId, brandTokens, nameToken, limit);
+        return cache.computeIfAbsent(key, k -> search(k.shopId(), k.brandTokens(), k.nameToken(), k.limit()));
+    }
+
+    private List<Product> search(String shopId, Set<String> brandTokens, String nameToken, int limit) {
+        Map<Long, Product> byId = new LinkedHashMap<>();
+
+        if (!brandTokens.isEmpty()) {
+            for (Product p : productRepository.findByShopIdAndBrandTokenIn(shopId, brandTokens, PageRequest.of(0, limit))) {
+                byId.putIfAbsent(p.getId(), p);
+            }
+        }
+        if (byId.size() < limit && nameToken != null) {
+            for (Product p : productRepository.findByShopIdAndNameContainingIgnoreCase(
+                    shopId, nameToken, PageRequest.of(0, limit))) {
+                byId.putIfAbsent(p.getId(), p);
+            }
+        }
+        if (byId.size() < limit) {
+            // Last-resort backfill: keeps behavior sane for rows with no usable brand/name signal at
+            // all (e.g. a blank/garbage row) instead of returning zero candidates outright. This never
+            // hides a content-matched candidate - it only ever adds MORE candidates on top.
+            int remaining = limit - byId.size();
+            for (Product p : productRepository.findByShopIdOrderByIdAsc(shopId, PageRequest.of(0, remaining + byId.size()))) {
+                if (byId.size() >= limit) {
+                    break;
+                }
+                byId.putIfAbsent(p.getId(), p);
+            }
+        }
+        return new LinkedHashSet<>(byId.values()).stream().limit(limit).toList();
+    }
+
+    /** Longest word (&gt;=4 chars) in the row's cleaned search name - the best single discriminator for a LIKE shortlist. */
+    private String longestToken(String searchName) {
+        if (searchName == null || searchName.isBlank()) {
+            return null;
+        }
+        String best = null;
+        for (String token : searchName.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+")) {
+            if (token.length() >= 4 && (best == null || token.length() > best.length())) {
+                best = token;
+            }
+        }
+        return best;
     }
 
     @Override
@@ -49,6 +108,6 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
         cache.keySet().removeIf(key -> key.shopId().equals(shopId));
     }
 
-    private record CacheKey(String shopId, int limit) {
+    private record CacheKey(String shopId, Set<String> brandTokens, String nameToken, int limit) {
     }
 }

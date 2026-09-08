@@ -27,11 +27,16 @@ vi.mock('@/api/client', async () => {
       listSuppliers: listSuppliersMock,
       listSupplierSources: listSupplierSourcesMock,
       uploadSupplierPrice: uploadSupplierPriceMock,
+      listBrandAliases: vi.fn().mockResolvedValue([]),
       testMailbox: vi.fn(),
       pollMailbox: vi.fn(),
       createMailbox: vi.fn(),
       createSupplier: vi.fn(),
       createSupplierSource: vi.fn(),
+      updateSupplierSource: vi.fn(),
+      graduateSupplierSource: vi.fn(),
+      createBrandAlias: vi.fn(),
+      deleteBrandAlias: vi.fn(),
     },
   }
 })

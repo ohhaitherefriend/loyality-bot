@@ -18,6 +18,13 @@ public interface RedeemCodeRepository extends JpaRepository<RedeemCode, Long> {
      * Находит код погашения по коду
      */
     Optional<RedeemCode> findByCode(String code);
+
+    /**
+     * Shop-scoped lookup used for cancel/confirm redemption (Stage 8 security hardening): {@code
+     * code} is globally unique in the DB, but without this scope an admin/customer from one shop
+     * could act on another shop's redeem code if they obtained the digits.
+     */
+    Optional<RedeemCode> findByCodeAndUser_ShopId(String code, String shopId);
     
     /**
      * Находит активные коды пользователя

@@ -1,15 +1,16 @@
 -- V17: Supplier sync automation foundation (Prompt 01).
 --
--- NOTE on schema management: Flyway is currently disabled in all profiles
--- (see application.yml / application-prod.yml) and both dev/prod rely on
--- Hibernate `ddl-auto: update` against JPA entity annotations for the actual
--- applied schema, exactly like V1-V16 before this file. This migration is
--- written to be the intended PostgreSQL-compatible schema for when Flyway is
--- enabled (tracked as a separate, already-flagged blocker in docs/STATE.md -
--- production baseline is unconfirmed and older migrations mix MySQL/Postgres
--- dialect assumptions). JSON columns are declared JSONB here; the entities
--- currently persist them as TEXT via Hibernate to stay portable between H2
--- (tests/dev) and PostgreSQL (prod) without a native JSON type converter.
+-- Schema management (Stage 6/ADR-012 + ADR-013): Flyway is enabled for the `prod` profile with
+-- `spring.jpa.hibernate.ddl-auto: validate`, so from V24 onward these migration files (not
+-- Hibernate) are the source of truth for the applied production schema. This particular file is
+-- baselined away in `prod` (see V18's comment / ADR-013) because its schema was already built up
+-- there via `ddl-auto: update` before Flyway was introduced - it remains the real, executed source
+-- of truth for every fresh database (dev/test Testcontainers, new environments). JSON-shaped
+-- columns below are declared TEXT (not JSONB): the corresponding entity fields are all plain
+-- `@Column(columnDefinition = "TEXT") String` (no native JSON type converter), and PostgreSQL's
+-- JDBC driver rejects binding a TEXT/VARCHAR parameter into a JSONB column without an explicit
+-- cast - TEXT keeps the migrated schema consistent with what Hibernate actually writes, and
+-- portable with the H2-backed dev/test schema (H2 has no JSONB type).
 
 CREATE TABLE IF NOT EXISTS suppliers (
     id BIGSERIAL PRIMARY KEY,
@@ -89,7 +90,7 @@ CREATE TABLE IF NOT EXISTS import_rule_versions (
     version INTEGER NOT NULL,
     status VARCHAR(16) NOT NULL DEFAULT 'DRAFT',
     source VARCHAR(16) NOT NULL DEFAULT 'MANUAL',
-    rule_definition JSONB NOT NULL,
+    rule_definition TEXT NOT NULL,
     created_at TIMESTAMP,
     CONSTRAINT fk_import_rule_versions_shop FOREIGN KEY (shop_id) REFERENCES shops(shop_id),
     CONSTRAINT fk_import_rule_versions_source FOREIGN KEY (supplier_source_id) REFERENCES supplier_sources(id),
@@ -108,7 +109,7 @@ CREATE TABLE IF NOT EXISTS import_files (
     media_type VARCHAR(255) NOT NULL,
     original_filename VARCHAR(512) NOT NULL,
     storage_key VARCHAR(1024) NOT NULL,
-    source_identity JSONB,
+    source_identity TEXT,
     received_at TIMESTAMP NOT NULL,
     CONSTRAINT fk_import_files_shop FOREIGN KEY (shop_id) REFERENCES shops(shop_id),
     CONSTRAINT fk_import_files_source FOREIGN KEY (supplier_source_id) REFERENCES supplier_sources(id),
@@ -150,8 +151,8 @@ CREATE TABLE IF NOT EXISTS import_rows (
     import_batch_id BIGINT NOT NULL,
     source_sheet VARCHAR(255),
     source_row_number INTEGER,
-    raw_data JSONB,
-    normalized_data JSONB,
+    raw_data TEXT,
+    normalized_data TEXT,
     status VARCHAR(32) DEFAULT 'PENDING',
     matched_product_id BIGINT,
     created_at TIMESTAMP,
@@ -221,14 +222,14 @@ CREATE TABLE IF NOT EXISTS match_decisions (
     id BIGSERIAL PRIMARY KEY,
     shop_id VARCHAR(36) NOT NULL,
     import_row_id BIGINT NOT NULL,
-    candidate_product_ids JSONB,
+    candidate_product_ids TEXT,
     chosen_product_id BIGINT,
     decision_type VARCHAR(16) NOT NULL,
     confidence_score NUMERIC(5, 4),
     model_provider VARCHAR(64),
     model_name VARCHAR(128),
     prompt_version VARCHAR(64),
-    conflicts JSONB,
+    conflicts TEXT,
     reason VARCHAR(512),
     decided_by VARCHAR(16) NOT NULL DEFAULT 'SYSTEM',
     decided_at TIMESTAMP,

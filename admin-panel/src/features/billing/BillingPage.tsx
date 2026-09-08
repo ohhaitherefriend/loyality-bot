@@ -108,7 +108,7 @@ export function BillingPage() {
         onSuccess: async () => {
           try {
             await api.confirmPayment(currentShopId!, planCode)
-          } catch (e) {
+          } catch {
             // webhook мог уже активировать подписку
           }
           queryClient.invalidateQueries({ queryKey: ['subscription'] })
@@ -125,7 +125,7 @@ export function BillingPage() {
           })
         },
       })
-    } catch (e) {
+    } catch {
       toast({
         title: 'Ошибка',
         description: 'Не удалось подготовить платёж. Попробуйте позже.',

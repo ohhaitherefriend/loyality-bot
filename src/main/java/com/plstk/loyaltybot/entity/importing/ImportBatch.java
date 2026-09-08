@@ -82,6 +82,16 @@ public class ImportBatch {
     /** Set once the Prompt 06 Apply stage reaches {@code APPLIED} for this batch. */
     private LocalDateTime appliedAt;
 
+    // ===== NEEDS_ATTENTION -> APPROVED operator audit (Stage 2 hardening pass) =====
+
+    /** Operator who approved this batch out of {@code NEEDS_ATTENTION}; null for automatic batches. */
+    private Long approvedByUserId;
+
+    @Column(length = 255)
+    private String approvedByEmail;
+
+    private LocalDateTime approvedAt;
+
     // ===== Apply audit counters (Prompt 06, docs/ARCHITECTURE.md §14.11) - all null until APPLIED. =====
 
     /** New {@code SupplierOffer} rows created by this batch's apply. */

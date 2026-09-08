@@ -13,6 +13,7 @@ import com.plstk.loyaltybot.entity.importing.SnapshotMode;
 import com.plstk.loyaltybot.entity.importing.Supplier;
 import com.plstk.loyaltybot.entity.importing.SupplierOffer;
 import com.plstk.loyaltybot.entity.importing.SupplierSource;
+import com.plstk.loyaltybot.repository.BrandAliasRepository;
 import com.plstk.loyaltybot.repository.ImportBatchRepository;
 import com.plstk.loyaltybot.repository.ImportFileRepository;
 import com.plstk.loyaltybot.repository.ImportRowRepository;
@@ -219,7 +220,7 @@ class SupplierImportEndToEndTest {
         assertTrue(chanel.getActive());
 
         SupplierOffer offer = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndProductId(SHOP_ID, supplier.getId(), chanel.getId())
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplier.getId(), "ALL", chanel.getId())
                 .orElseThrow();
         assertEquals(new BigDecimal("30.00"), offer.getAppliedCommissionPercent());
         assertTrue(offer.getActive());
@@ -261,7 +262,7 @@ class SupplierImportEndToEndTest {
         // this suite's job is to verify the Apply stage's multi-supplier availability rule when driven
         // through the real pipeline, not to re-derive the AI matching decision for a second supplier).
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_ID).supplier(supplierB).supplierSource(sourceA).product(shared)
+                .shopId(SHOP_ID).supplier(supplierB).supplierSource(sourceA).snapshotScope("ALL").product(shared)
                 .supplierPrice(new BigDecimal("190.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("247.00")).active(true).build());
         entityManager.flush();
@@ -277,13 +278,15 @@ class SupplierImportEndToEndTest {
         assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch2).getStatus());
 
         SupplierOffer onlyAOfferAfterBatch2 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndProductId(SHOP_ID, supplierA.getId(), onlyA.getId()).orElseThrow();
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", onlyA.getId())
+                .orElseThrow();
         assertFalse(onlyAOfferAfterBatch2.getActive(), "Supplier A's offer must be deactivated when it disappears from a FULL snapshot");
         assertFalse(reloadProduct(onlyA.getId()).getVisible(),
                 "a product with zero active offers must disappear from the storefront");
 
         SupplierOffer sharedOfferAfterBatch2 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndProductId(SHOP_ID, supplierA.getId(), shared.getId()).orElseThrow();
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", shared.getId())
+                .orElseThrow();
         assertFalse(sharedOfferAfterBatch2.getActive(), "Supplier A's own offer for SHARED must also be deactivated");
         assertTrue(reloadProduct(shared.getId()).getVisible(),
                 "SHARED must remain visible on storefront because Supplier B's offer is still active");
@@ -298,7 +301,8 @@ class SupplierImportEndToEndTest {
         assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch3).getStatus());
 
         SupplierOffer onlyAOfferAfterBatch3 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndProductId(SHOP_ID, supplierA.getId(), onlyA.getId()).orElseThrow();
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", onlyA.getId())
+                .orElseThrow();
         assertTrue(onlyAOfferAfterBatch3.getActive(), "a reappearing offer must be reactivated automatically");
         assertTrue(reloadProduct(onlyA.getId()).getVisible(), "the product must return to the storefront automatically");
     }
@@ -650,8 +654,13 @@ class SupplierImportEndToEndTest {
         }
 
         @Bean
-        BrandAliasResolver brandAliasResolver() {
-            return new BrandAliasResolver();
+        BrandNormalizer brandNormalizer() {
+            return new BrandNormalizer();
+        }
+
+        @Bean
+        BrandAliasResolver brandAliasResolver(BrandAliasRepository brandAliasRepository, BrandNormalizer brandNormalizer) {
+            return new BrandAliasResolver(brandAliasRepository, brandNormalizer);
         }
 
         @Bean
@@ -665,15 +674,16 @@ class SupplierImportEndToEndTest {
         }
 
         @Bean
-        ProductCandidateFetcher productCandidateFetcher(ProductRepository productRepository) {
-            return new SimpleProductCandidateFetcher(productRepository);
+        ProductCandidateFetcher productCandidateFetcher(
+                ProductRepository productRepository, BrandAliasResolver brandAliasResolver, BrandNormalizer brandNormalizer) {
+            return new SimpleProductCandidateFetcher(productRepository, brandAliasResolver, brandNormalizer);
         }
 
         @Bean
         CandidateSearchService candidateSearchService(
                 ProductCandidateFetcher candidateFetcher, RowAttributeNormalizer normalizer,
-                CandidateScorer scorer, SupplierImportProperties properties) {
-            return new CandidateSearchService(candidateFetcher, normalizer, scorer, properties);
+                CandidateScorer scorer, SupplierImportProperties properties, BrandAliasResolver brandAliasResolver) {
+            return new CandidateSearchService(candidateFetcher, normalizer, scorer, properties, brandAliasResolver);
         }
 
         @Bean

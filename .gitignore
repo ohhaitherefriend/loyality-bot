@@ -24,6 +24,10 @@ target/
 /nbbuild/
 /dist/
 /nbdist/
+
+### Frontend build output ###
+# Vite output is generated on every build; it must never be committed (Stage 9).
+admin-panel/dist/
 /.nb-gradle/
 build/
 !**/src/main/**/build/

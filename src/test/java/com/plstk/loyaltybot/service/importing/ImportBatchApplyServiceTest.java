@@ -114,7 +114,8 @@ class ImportBatchApplyServiceTest {
         assertTrue(product.getVisible(), "a new product with an active offer and no manualHidden must be visible");
         assertEquals(new BigDecimal("130.00"), product.getSalePrice());
 
-        SupplierOffer offer = supplierOfferRepository.findByShopIdAndSupplierIdAndProductId(SHOP_A, supplier.getId(), product.getId())
+        SupplierOffer offer = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), source.getSnapshotScope(), product.getId())
                 .orElseThrow();
         assertTrue(offer.getActive());
         assertEquals(new BigDecimal("100.00"), offer.getSupplierPrice());
@@ -138,7 +139,7 @@ class ImportBatchApplyServiceTest {
         SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
         Product product = saveProduct("Existing", false);
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).stockQuantity(5).active(true).build());
         flushClear();
@@ -161,7 +162,7 @@ class ImportBatchApplyServiceTest {
         SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
         Product product = saveProduct("Existing", false);
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).stockQuantity(5).active(true).build());
         flushClear();
@@ -177,7 +178,8 @@ class ImportBatchApplyServiceTest {
         assertEquals(1, batch.getOffersPriceChangedCount());
         assertEquals(0, batch.getOffersUnchangedCount());
 
-        SupplierOffer offer = supplierOfferRepository.findByShopIdAndSupplierIdAndProductId(SHOP_A, supplier.getId(), product.getId())
+        SupplierOffer offer = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), source.getSnapshotScope(), product.getId())
                 .orElseThrow();
         assertEquals(new BigDecimal("260.00"), offer.getCalculatedSitePrice());
         assertEquals(8, offer.getStockQuantity());
@@ -189,7 +191,7 @@ class ImportBatchApplyServiceTest {
         SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
         Product product = saveProduct("Disappearing", true);
         SupplierOffer existingOffer = supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).stockQuantity(5).active(true).build());
         flushClear();
@@ -218,7 +220,7 @@ class ImportBatchApplyServiceTest {
         SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
         Product product = saveProduct("StaysActive", true);
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).stockQuantity(5).active(true).build());
         flushClear();
@@ -232,7 +234,8 @@ class ImportBatchApplyServiceTest {
 
         ImportBatch batch = reloadBatch(batchId);
         assertEquals(0, batch.getProductsRemovedFromStorefrontCount());
-        SupplierOffer offer = supplierOfferRepository.findByShopIdAndSupplierIdAndProductId(SHOP_A, supplier.getId(), product.getId())
+        SupplierOffer offer = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), source.getSnapshotScope(), product.getId())
                 .orElseThrow();
         assertTrue(offer.getActive(), "DELTA snapshots must never deactivate offers outside their own rows");
         assertTrue(reloadProduct(product.getId()).getVisible());
@@ -268,11 +271,11 @@ class ImportBatchApplyServiceTest {
         Product productA = saveProduct("InScopeA", true);
         Product productB = saveProduct("InScopeB", true);
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(sourceA).product(productA)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(sourceA).snapshotScope(sourceA.getSnapshotScope()).product(productA)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).active(true).build());
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(sourceB).product(productB)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(sourceB).snapshotScope(sourceB.getSnapshotScope()).product(productB)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).active(true).build());
         flushClear();
@@ -288,6 +291,64 @@ class ImportBatchApplyServiceTest {
         assertTrue(reloadProduct(productB.getId()).getVisible(), "scope B must be completely unaffected by scope A's apply");
     }
 
+    /**
+     * Stage 3 regression: the SAME product supplied under two independent {@code snapshotScope}s of
+     * the SAME supplier (e.g. two category price-list files) must persist as two distinct
+     * {@code SupplierOffer} rows. Before the (shop, supplier, snapshotScope, product) identity fix,
+     * a bare (shop, supplier, product) key made the second scope's apply silently overwrite/steal the
+     * first scope's offer row, so scope A's own FULL reconciliation could no longer find "its" offer
+     * and either wrongly deactivated the wrong scope's data or lost track of the product entirely.
+     */
+    @Test
+    void sameProductInTwoScopes_ofSameSupplier_areIndependentOffersThatDoNotStealEachOther() {
+        SupplierSource sourceA = saveSource(SnapshotMode.FULL, "SCOPE_A", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        SupplierSource sourceB = saveSource(SnapshotMode.FULL, "SCOPE_B", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        Product shared = saveProduct("SharedAcrossScopes", true);
+
+        Long batchA = createBatch(sourceA, ImportBatchStatus.AUTO_APPROVED);
+        addRow(batchA, normalized("SKU-A", null, "100.00", "Brand", 5), shared, null);
+        flushClear();
+        importBatchApplyService.applyNewly(batchA);
+        flushClear();
+
+        Long batchB = createBatch(sourceB, ImportBatchStatus.AUTO_APPROVED);
+        addRow(batchB, normalized("SKU-B", null, "200.00", "Brand", 3), shared, null);
+        flushClear();
+        importBatchApplyService.applyNewly(batchB);
+        flushClear();
+
+        assertEquals(2, supplierOfferRepository.findByShopIdAndProductIdAndActiveTrue(SHOP_A, shared.getId()).size(),
+                "two independent scopes of the same supplier for the same product must be two distinct offer rows");
+
+        SupplierOffer offerA = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), "SCOPE_A", shared.getId())
+                .orElseThrow();
+        SupplierOffer offerB = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), "SCOPE_B", shared.getId())
+                .orElseThrow();
+        assertTrue(offerA.getActive());
+        assertTrue(offerB.getActive());
+        assertEquals(new BigDecimal("100.00"), offerA.getSupplierPrice());
+        assertEquals(new BigDecimal("200.00"), offerB.getSupplierPrice());
+
+        // Scope A's next FULL snapshot no longer lists the product: only scope A's own offer must
+        // deactivate. Scope B's offer (and therefore the product's storefront visibility) is untouched.
+        Long batchA2 = createBatch(sourceA, ImportBatchStatus.AUTO_APPROVED);
+        flushClear();
+        importBatchApplyService.applyNewly(batchA2);
+        flushClear();
+
+        SupplierOffer offerAAfter = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), "SCOPE_A", shared.getId())
+                .orElseThrow();
+        SupplierOffer offerBAfter = supplierOfferRepository
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_A, supplier.getId(), "SCOPE_B", shared.getId())
+                .orElseThrow();
+        assertFalse(offerAAfter.getActive(), "scope A's offer must deactivate when scope A's snapshot no longer lists it");
+        assertTrue(offerBAfter.getActive(), "scope B's offer must be completely unaffected by scope A's apply");
+        assertTrue(reloadProduct(shared.getId()).getVisible(), "product stays visible via scope B's still-active offer");
+    }
+
     @Test
     void multiSupplierAvailability_oneSupplierDeactivated_productStaysVisibleViaOtherSupplier() {
         Supplier supplier2 = supplierRepository.save(Supplier.builder().shopId(SHOP_A).name("Supplier Two").build());
@@ -296,11 +357,11 @@ class ImportBatchApplyServiceTest {
 
         Product product = saveProduct("SharedAcrossSuppliers", true);
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source1).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source1).snapshotScope(source1.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("100.00")).active(true).build());
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier2).supplierSource(source2).product(product)
+                .shopId(SHOP_A).supplier(supplier2).supplierSource(source2).snapshotScope(source2.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("200.00")).active(true).build());
         flushClear();

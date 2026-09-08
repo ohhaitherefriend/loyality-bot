@@ -2,7 +2,7 @@
 
 -- Таблица определений бейджей
 CREATE TABLE IF NOT EXISTS manual_badge_definitions (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     description TEXT,
     emoji VARCHAR(10) NOT NULL DEFAULT '🎖',
@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS manual_badge_definitions (
 
 -- Таблица выданных бейджей
 CREATE TABLE IF NOT EXISTS customer_badges (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     badge_id BIGINT NOT NULL,
     awarded_by_id BIGINT,

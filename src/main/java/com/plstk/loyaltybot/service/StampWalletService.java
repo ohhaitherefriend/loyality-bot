@@ -141,10 +141,12 @@ public class StampWalletService {
     }
     
     /**
-     * Находит код погашения
+     * Находит код погашения, ограничивая поиск магазином пользователя (Stage 8: {@code code}
+     * глобально уникален в БД, но без этого скоупа можно было бы отменить/подтвердить код чужого
+     * магазина, зная только цифры).
      */
-    public Optional<RedeemCode> findRedeemCode(String code) {
-        return redeemCodeRepository.findByCode(code.toUpperCase().trim());
+    public Optional<RedeemCode> findRedeemCode(String code, String shopId) {
+        return redeemCodeRepository.findByCodeAndUser_ShopId(code.toUpperCase().trim(), shopId);
     }
     
     /**
@@ -162,7 +164,9 @@ public class StampWalletService {
      */
     @Transactional
     public RedeemResult confirmRedeem(String code, User admin) {
-        RedeemCode redeemCode = redeemCodeRepository.findByCode(code.toUpperCase().trim())
+        // Stage 8: scope by admin.getShopId() so one shop's admin can never confirm another
+        // shop's redeem code, even though `code` itself is a globally unique DB value.
+        RedeemCode redeemCode = redeemCodeRepository.findByCodeAndUser_ShopId(code.toUpperCase().trim(), admin.getShopId())
             .orElseThrow(() -> new IllegalStateException("Код не найден"));
         
         if (redeemCode.getStatus() != RedeemCode.RedeemCodeStatus.ACTIVE) {

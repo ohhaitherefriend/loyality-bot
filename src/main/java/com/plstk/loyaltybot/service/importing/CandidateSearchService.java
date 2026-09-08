@@ -21,16 +21,19 @@ public class CandidateSearchService {
     private final RowAttributeNormalizer normalizer;
     private final CandidateScorer scorer;
     private final SupplierImportProperties properties;
+    private final BrandAliasResolver brandAliasResolver;
 
     public CandidateSearchService(
             ProductCandidateFetcher candidateFetcher,
             RowAttributeNormalizer normalizer,
             CandidateScorer scorer,
-            SupplierImportProperties properties) {
+            SupplierImportProperties properties,
+            BrandAliasResolver brandAliasResolver) {
         this.candidateFetcher = candidateFetcher;
         this.normalizer = normalizer;
         this.scorer = scorer;
         this.properties = properties;
+        this.brandAliasResolver = brandAliasResolver;
     }
 
     /**
@@ -39,6 +42,7 @@ public class CandidateSearchService {
      */
     public void startNewBatch(String shopId) {
         candidateFetcher.invalidateForNewBatch(shopId);
+        brandAliasResolver.invalidateForNewBatch(shopId);
     }
 
     /** @return every fetched candidate, scored and sorted by {@code totalScore} descending (unbounded). */
@@ -47,7 +51,7 @@ public class CandidateSearchService {
         List<Product> fetched = candidateFetcher.fetchCandidates(shopId, row, cfg.getCandidateFetchLimit());
 
         return fetched.stream()
-                .map(product -> scorer.score(product.getId(), product.getName(), row, normalizer.normalizeProduct(product)))
+                .map(product -> scorer.score(shopId, product.getId(), product.getName(), row, normalizer.normalizeProduct(product)))
                 .sorted(Comparator.comparing(ScoredCandidate::totalScore).reversed())
                 .toList();
     }

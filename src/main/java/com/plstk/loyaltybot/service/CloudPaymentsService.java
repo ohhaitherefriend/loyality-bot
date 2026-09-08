@@ -35,6 +35,17 @@ public class CloudPaymentsService {
     }
 
     /**
+     * True once a real CloudPayments API secret is configured. Stage 8 security hardening uses
+     * this as the single signal to decide whether {@code confirm-payment} may still activate a
+     * subscription client-side (dev/stub mode, no secret configured — same signal
+     * {@link #validateHmac} already uses to skip signature checks) or must defer exclusively to
+     * the HMAC-validated {@code /cloudpayments/pay} webhook (a real gateway is wired up).
+     */
+    public boolean isLiveGatewayConfigured() {
+        return apiSecret != null && !apiSecret.isBlank();
+    }
+
+    /**
      * Валидация HMAC подписи от CloudPayments.
      * CloudPayments подписывает тело запроса HMAC-SHA256, ключ — API secret.
      */

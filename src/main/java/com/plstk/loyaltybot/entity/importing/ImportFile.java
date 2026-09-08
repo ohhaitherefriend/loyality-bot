@@ -63,6 +63,14 @@ public class ImportFile {
     @Column(nullable = false)
     private LocalDateTime receivedAt;
 
+    /**
+     * Set by {@code ImportRetentionJob} (Stage 10, docs/DECISIONS.md ADR-015) once the underlying
+     * {@code ImportFileStorage} blob has been deleted for a terminal batch past the configured
+     * retention window. This metadata row is never deleted - only the blob - so null here just
+     * means the blob still exists (or retention is disabled/hasn't reached this file yet).
+     */
+    private LocalDateTime storageDeletedAt;
+
     @PrePersist
     protected void onCreate() {
         if (receivedAt == null) {

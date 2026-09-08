@@ -122,7 +122,7 @@ class SupplierSyncConstraintsTest {
     }
 
     @Test
-    void supplierOfferUniqueConstraint_oneActiveOfferRowPerSupplierAndProduct() {
+    void supplierOfferUniqueConstraint_oneActiveOfferRowPerSupplierScopeAndProduct() {
         Supplier supplier = supplierRepository.save(newSupplier(SHOP_A, "Supplier"));
         SupplierSource source = supplierSourceRepository.save(newSource(SHOP_A, supplier));
         Product product = productRepository.save(Product.builder()
@@ -131,11 +131,33 @@ class SupplierSyncConstraintsTest {
                 .build());
         entityManager.flush();
 
-        supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, product));
+        supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, "SUPPLIER_ALL", product));
         entityManager.flush();
 
         assertThrows(DataIntegrityViolationException.class,
-                () -> supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, product)));
+                () -> supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, "SUPPLIER_ALL", product)));
+    }
+
+    /**
+     * Stage 3: identity is (shop, supplier, snapshotScope, product) - two independent scopes of the
+     * same supplier offering the same product must be two distinct, coexisting rows, not a
+     * constraint violation and not a silent overwrite.
+     */
+    @Test
+    void supplierOfferUniqueConstraint_allowsDifferentScopesForSameSupplierAndProduct() {
+        Supplier supplier = supplierRepository.save(newSupplier(SHOP_A, "Supplier"));
+        SupplierSource source = supplierSourceRepository.save(newSource(SHOP_A, supplier));
+        Product product = productRepository.save(Product.builder()
+                .shopId(SHOP_A)
+                .name("Test product")
+                .build());
+        entityManager.flush();
+
+        supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, "SCOPE_A", product));
+        supplierOfferRepository.save(newOffer(SHOP_A, supplier, source, "SCOPE_B", product));
+        entityManager.flush();
+
+        assertEquals(2, supplierOfferRepository.findByShopIdAndProductIdAndActiveTrue(SHOP_A, product.getId()).size());
     }
 
     private Supplier newSupplier(String shopId, String name) {
@@ -169,11 +191,12 @@ class SupplierSyncConstraintsTest {
                 .build();
     }
 
-    private SupplierOffer newOffer(String shopId, Supplier supplier, SupplierSource source, Product product) {
+    private SupplierOffer newOffer(String shopId, Supplier supplier, SupplierSource source, String snapshotScope, Product product) {
         return SupplierOffer.builder()
                 .shopId(shopId)
                 .supplier(supplier)
                 .supplierSource(source)
+                .snapshotScope(snapshotScope)
                 .product(product)
                 .supplierPrice(new BigDecimal("1000.00"))
                 .appliedCommissionPercent(new BigDecimal("30.00"))

@@ -54,7 +54,9 @@ public class SecurityConfig {
                     .requestMatchers(new AntPathRequestMatcher("/api/storefront/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/tg/webhook/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/max/webhook/**")).permitAll()
-                    .requestMatchers(new AntPathRequestMatcher("/actuator/health")).permitAll()
+                    // /actuator/health/** also covers the liveness/readiness probe sub-paths
+                    // (Stage 10) - container orchestrators hit these unauthenticated.
+                    .requestMatchers(new AntPathRequestMatcher("/actuator/health/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/info")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/files/product-images/**")).permitAll()
                     .requestMatchers(new AntPathRequestMatcher("/actuator/**")).authenticated()

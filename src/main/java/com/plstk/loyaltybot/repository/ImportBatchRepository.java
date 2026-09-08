@@ -28,6 +28,15 @@ public interface ImportBatchRepository extends JpaRepository<ImportBatch, Long> 
     List<ImportBatch> findByStatusInOrderByIdAsc(List<ImportBatchStatus> statuses);
 
     /**
+     * Used by the Stage 1 {@code /graduate} safe-activation endpoint: counts how many batches of
+     * this source are currently in one of the given statuses. Called twice with different status
+     * lists - once for "at least one batch already passed guards while in shadow mode" (positive
+     * gate), once for "no open QUARANTINED/FAILED batch" (blocking gate).
+     */
+    long countByShopIdAndSupplierSourceIdAndStatusIn(
+            String shopId, Long supplierSourceId, List<ImportBatchStatus> statuses);
+
+    /**
      * Previous successfully applied batch for the same supplier source, used by the Prompt 06
      * row-count-collapse guard. Excludes the batch currently being evaluated (relevant for
      * idempotent re-runs/tests that reuse the same supplier source).
@@ -179,10 +188,38 @@ public interface ImportBatchRepository extends JpaRepository<ImportBatch, Long> 
             @Param("reason") String reason,
             @Param("finishedAt") LocalDateTime finishedAt);
 
-    /** NEEDS_ATTENTION batches are already fully decided; an operator approve = manual graduation to apply. */
-    @Modifying
+    /**
+     * NEEDS_ATTENTION batches are already fully decided at the row level; an operator approve is a
+     * manual graduation to apply, gated by {@code ImportBatchApprovalService} (re-checks guards and
+     * unresolved rows before ever calling this). Conditional on the current status (same
+     * repeat-safe/race-proof pattern as every other {@code claimForX}/{@code finalizeXFrom} above)
+     * so a double-click or concurrent request can never double-approve or race the automatic apply
+     * job picking the batch up mid-transition.
+     */
+    @Modifying(clearAutomatically = true)
     @Query("UPDATE ImportBatch b SET b.status = com.plstk.loyaltybot.entity.importing.ImportBatchStatus.APPROVED, "
-            + "b.errorMessage = NULL WHERE b.id = :id "
+            + "b.errorMessage = NULL, b.approvedByUserId = :userId, b.approvedByEmail = :userEmail, "
+            + "b.approvedAt = :approvedAt WHERE b.id = :id "
             + "AND b.status = com.plstk.loyaltybot.entity.importing.ImportBatchStatus.NEEDS_ATTENTION")
-    int approveNeedsAttention(@Param("id") Long id);
+    int approveNeedsAttention(
+            @Param("id") Long id,
+            @Param("userId") Long userId,
+            @Param("userEmail") String userEmail,
+            @Param("approvedAt") LocalDateTime approvedAt);
+
+    // ========== Stage 10 retention (ImportRetentionJob, docs/DECISIONS.md ADR-015) ==========
+
+    /**
+     * Terminal batches (APPLIED/QUARANTINED/FAILED - never anything still in flight) that finished
+     * before {@code cutoff} and whose {@code ImportFile} blob has not already been deleted. Ordered
+     * oldest-first and capped via {@code pageable} so one sweep only ever deletes a bounded number
+     * of blobs regardless of how large the backlog is.
+     */
+    @Query("SELECT b FROM ImportBatch b JOIN FETCH b.importFile f "
+            + "WHERE b.status IN :terminalStatuses AND b.finishedAt < :cutoff AND f.storageDeletedAt IS NULL "
+            + "ORDER BY b.finishedAt ASC")
+    List<ImportBatch> findEligibleForFileRetention(
+            @Param("terminalStatuses") List<ImportBatchStatus> terminalStatuses,
+            @Param("cutoff") LocalDateTime cutoff,
+            Pageable pageable);
 }

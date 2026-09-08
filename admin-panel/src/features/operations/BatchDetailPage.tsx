@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, PlayCircle, RefreshCw } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, Loader2, PlayCircle, RefreshCw } from 'lucide-react'
 
 import { api, ApiClientError } from '@/api/client'
 import type { ImportRowStatus } from '@/api/types'
@@ -90,6 +90,23 @@ export function BatchDetailPage() {
     },
   })
 
+  const approveMutation = useMutation({
+    mutationFn: () => api.approveBatch(shopId!, batchId),
+    onSuccess: (result) => {
+      toast({ title: 'Партия подтверждена', description: `Новый статус: ${BATCH_STATUS_LABELS[result.status]}` })
+      queryClient.invalidateQueries({ queryKey: ['batchDetail', shopId, batchId] })
+      queryClient.invalidateQueries({ queryKey: ['batchExceptions', shopId] })
+      queryClient.invalidateQueries({ queryKey: ['importDashboard', shopId] })
+    },
+    onError: (error: unknown) => {
+      toast({
+        variant: 'destructive',
+        title: 'Не удалось подтвердить партию',
+        description: error instanceof ApiClientError ? error.message : 'Попробуйте позже',
+      })
+    },
+  })
+
   if (!shopId) {
     return (
       <Alert>
@@ -121,6 +138,7 @@ export function BatchDetailPage() {
   const batch = batchQuery.data
   const rows = rowsQuery.data?.content ?? []
   const canResume = batch.status === 'QUARANTINED' || batch.status === 'FAILED';
+  const canApprove = batch.status === 'NEEDS_ATTENTION';
 
   return (
     <div className="space-y-6">
@@ -129,6 +147,16 @@ export function BatchDetailPage() {
           <ArrowLeft className="mr-1 h-4 w-4" /> К очереди исключений
         </Button>
         <div className="flex items-center gap-2">
+          {canApprove && (
+            <Button disabled={approveMutation.isPending} onClick={() => approveMutation.mutate()}>
+              {approveMutation.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="mr-1 h-4 w-4" />
+              )}
+              Подтвердить партию
+            </Button>
+          )}
           {canResume && (
             <Button disabled={resumeMutation.isPending} onClick={() => resumeMutation.mutate()}>
               {resumeMutation.isPending ? (

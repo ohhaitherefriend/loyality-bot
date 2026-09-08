@@ -1,23 +1,10 @@
 package com.plstk.loyaltybot.service.importing;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.plstk.loyaltybot.config.SupplierImportProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.HttpServerErrorException;
-import org.springframework.web.client.ResourceAccessException;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestTemplate;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -26,10 +13,11 @@ import java.util.Map;
 /**
  * DeepSeek implementation of {@link AiSpreadsheetLayoutDetector} over its OpenAI-compatible chat
  * completions endpoint (docs/ARCHITECTURE.md §10/§21). baseUrl/apiKey/model/timeouts all come from
- * {@code supplier-import.ai.deepseek.*} (config/env), never hardcoded. Retries with exponential
- * backoff apply only to retryable transport/status errors (timeout, 429, 5xx); malformed/empty JSON
- * content is a content problem, not a transport problem, so it is returned as a (non-retryable)
- * success — {@link LayoutRuleValidator} is responsible for rejecting bad content.
+ * {@code supplier-import.ai.deepseek.*} (config/env), never hardcoded. All HTTP transport
+ * (retry/backoff/circuit breaker/concurrency limiting) is delegated to the shared
+ * {@link DeepSeekHttpClient} (Stage 5) — this class only builds the prompt and maps the outcome.
+ * Malformed/empty JSON content is a content problem, not a transport problem, so it is returned as
+ * a (non-retryable) success — {@link LayoutRuleValidator} is responsible for rejecting bad content.
  */
 @Component
 @RequiredArgsConstructor
@@ -82,12 +70,12 @@ public class DeepSeekSpreadsheetLayoutDetector implements AiSpreadsheetLayoutDet
             """;
 
     private final SupplierImportProperties properties;
-    private final RestTemplate restTemplate;
+    private final DeepSeekHttpClient deepSeekHttpClient;
     private final ObjectMapper objectMapper;
     private final SupplierImportMetrics metrics;
 
     public boolean isConfigured() {
-        return StringUtils.hasText(cfg().getApiKey());
+        return deepSeekHttpClient.isConfigured();
     }
 
     @Override
@@ -97,7 +85,6 @@ public class DeepSeekSpreadsheetLayoutDetector implements AiSpreadsheetLayoutDet
                     "DeepSeek API key not configured", false, PROVIDER);
         }
 
-        SupplierImportProperties.DeepSeek cfg = cfg();
         String userPrompt;
         try {
             userPrompt = buildUserPrompt(request);
@@ -107,46 +94,15 @@ public class DeepSeekSpreadsheetLayoutDetector implements AiSpreadsheetLayoutDet
                     "Failed to serialize layout detection request: " + safeMessage(e), false, PROVIDER);
         }
 
-        int maxAttempts = Math.max(1, cfg.getMaxRetries() + 1);
-        String lastError = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            long start = System.currentTimeMillis();
-            try {
-                String content = callDeepSeek(cfg, userPrompt);
-                long latencyMs = System.currentTimeMillis() - start;
-                metrics.aiCall("layout_detect", "success");
-                return LayoutDetectionResponse.success(content, PROVIDER, cfg.getModel(), latencyMs);
-            } catch (RetryableCallException e) {
-                lastError = e.getMessage();
-                log.warn("DeepSeek layout detection attempt {}/{} failed retryably: {}",
-                        attempt, maxAttempts, e.getMessage());
-                metrics.aiCall("layout_detect", "retryable_failure");
-                if (attempt < maxAttempts) {
-                    sleepBackoff(cfg, attempt);
-                }
-            } catch (Exception e) {
-                log.warn("DeepSeek layout detection failed non-retryably: {}", e.getMessage());
-                metrics.aiCall("layout_detect", "failure");
-                return LayoutDetectionResponse.failure(
-                        "DeepSeek call failed: " + safeMessage(e), false, PROVIDER);
-            }
+        DeepSeekCallOutcome outcome = deepSeekHttpClient.chatCompletion(SYSTEM_PROMPT, userPrompt, "layout_detect");
+        if (!outcome.success()) {
+            return LayoutDetectionResponse.failure(outcome.errorMessage(), outcome.retryableFailure(), PROVIDER);
         }
-        metrics.aiCall("layout_detect", "failure");
-        return LayoutDetectionResponse.failure(
-                "DeepSeek call failed after " + maxAttempts + " attempt(s): " + lastError, true, PROVIDER);
+        return LayoutDetectionResponse.success(outcome.content(), PROVIDER, cfg().getModel(), outcome.latencyMs());
     }
 
     private SupplierImportProperties.DeepSeek cfg() {
         return properties.getAi().getDeepseek();
-    }
-
-    private void sleepBackoff(SupplierImportProperties.DeepSeek cfg, int attempt) {
-        long backoffMs = cfg.getRetryBackoffMs() * (1L << (attempt - 1));
-        try {
-            Thread.sleep(backoffMs);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     private String buildUserPrompt(LayoutDetectionRequest request) throws Exception {
@@ -169,65 +125,11 @@ public class DeepSeekSpreadsheetLayoutDetector implements AiSpreadsheetLayoutDet
                 + "\n\nReturn the strict JSON rule object described in the system prompt.";
     }
 
-    private String callDeepSeek(SupplierImportProperties.DeepSeek cfg, String userPrompt) {
-        String url = cfg.getBaseUrl();
-        if (url.endsWith("/")) {
-            url = url.substring(0, url.length() - 1);
-        }
-        url = url + "/v1/chat/completions";
-
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", cfg.getModel());
-        body.put("temperature", 0.0);
-        body.put("response_format", Map.of("type", "json_object"));
-        body.put("messages", List.of(
-                Map.of("role", "system", "content", SYSTEM_PROMPT),
-                Map.of("role", "user", "content", userPrompt)));
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setBearerAuth(cfg.getApiKey());
-
-        HttpEntity<Map<String, Object>> httpRequest = new HttpEntity<>(body, headers);
-        ResponseEntity<String> response;
-        try {
-            response = restTemplate.exchange(url, HttpMethod.POST, httpRequest, String.class);
-        } catch (HttpClientErrorException e) {
-            if (e.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS) {
-                throw new RetryableCallException("HTTP 429 rate limited", e);
-            }
-            throw new IllegalStateException("DeepSeek API client error: " + e.getStatusCode(), e);
-        } catch (HttpServerErrorException e) {
-            throw new RetryableCallException("HTTP " + e.getStatusCode().value() + " server error", e);
-        } catch (ResourceAccessException e) {
-            throw new RetryableCallException("Transport/timeout error: " + safeMessage(e), e);
-        } catch (RestClientException e) {
-            throw new IllegalStateException("DeepSeek API call failed: " + safeMessage(e), e);
-        }
-
-        if (!response.getStatusCode().is2xxSuccessful() || response.getBody() == null) {
-            throw new IllegalStateException("DeepSeek API error: " + response.getStatusCode());
-        }
-
-        try {
-            JsonNode root = objectMapper.readTree(response.getBody());
-            return root.path("choices").path(0).path("message").path("content").asText();
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to parse DeepSeek envelope response", e);
-        }
-    }
-
     private String safeMessage(Throwable t) {
         if (t == null) {
             return "unknown error";
         }
         String message = t.getMessage();
         return message != null ? message : t.getClass().getSimpleName();
-    }
-
-    private static final class RetryableCallException extends RuntimeException {
-        RetryableCallException(String message, Throwable cause) {
-            super(message, cause);
-        }
     }
 }

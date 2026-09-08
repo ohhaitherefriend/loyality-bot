@@ -3,7 +3,6 @@ package com.plstk.loyaltybot.service.importing;
 import com.plstk.loyaltybot.config.SupplierImportProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,13 +11,18 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * Local filesystem реализация {@link ImportFileStorage} для dev/test и как fallback до
- * подключения S3-compatible storage в production. Запись атомарна (temp file + move в тот же
- * каталог). На POSIX {@code ATOMIC_MOVE} может молча перезаписать уже существующий объект
- * (не выбрасывает {@code FileAlreadyExistsException} - это гарантирует {@code rename(2)}, а не
- * JDK); это безопасно только потому, что {@code storageKey} content-addressed (см. {@link #store}).
+ * Local filesystem реализация {@link ImportFileStorage} - default provider (dev/test и
+ * single-replica production). Запись атомарна (temp file + move в тот же каталог). На POSIX
+ * {@code ATOMIC_MOVE} может молча перезаписать уже существующий объект (не выбрасывает
+ * {@code FileAlreadyExistsException} - это гарантирует {@code rename(2)}, а не JDK); это безопасно
+ * только потому, что {@code storageKey} content-addressed (см. {@link #store}).
+ *
+ * <p><b>Multi-replica warning</b> (Stage 10, docs/DECISIONS.md ADR-014): this storage is a local
+ * disk path. If the app is scaled to more than one replica without a shared/networked volume,
+ * a file stored by one replica is invisible to {@link #open}/{@link #exists} on another replica -
+ * use {@link S3ImportFileStorage} ({@code supplier-import.storage.provider=s3}) for any
+ * multi-replica deployment.</p>
  */
-@Service
 @RequiredArgsConstructor
 @Slf4j
 public class LocalImportFileStorage implements ImportFileStorage {
@@ -63,6 +67,11 @@ public class LocalImportFileStorage implements ImportFileStorage {
     @Override
     public boolean exists(String storageKey) {
         return Files.exists(resolve(storageKey));
+    }
+
+    @Override
+    public void delete(String storageKey) throws IOException {
+        Files.deleteIfExists(resolve(storageKey));
     }
 
     private Path resolve(String storageKey) {

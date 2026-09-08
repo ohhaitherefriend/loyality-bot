@@ -1,13 +1,15 @@
 package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.AdminUser;
+import com.plstk.loyaltybot.entity.ShopMember.MemberRole;
 import com.plstk.loyaltybot.entity.commerce.Product;
 import com.plstk.loyaltybot.entity.importing.ImportBatch;
 import com.plstk.loyaltybot.entity.importing.ImportRow;
 import com.plstk.loyaltybot.entity.importing.ImportRowStatus;
-import com.plstk.loyaltybot.service.ShopAccessService;
+import com.plstk.loyaltybot.service.AuthorizationService;
 import com.plstk.loyaltybot.service.importing.BatchExceptionSummary;
 import com.plstk.loyaltybot.service.importing.BulkReviewResult;
+import com.plstk.loyaltybot.service.importing.ImportBatchApprovalService;
 import com.plstk.loyaltybot.service.importing.ImportBatchDetailService;
 import com.plstk.loyaltybot.service.importing.ImportBatchResumeService;
 import com.plstk.loyaltybot.service.importing.ImportDashboardResponse;
@@ -37,21 +39,23 @@ import java.util.Map;
 /**
  * Prompt 07 automation control-panel endpoints (docs/ARCHITECTURE.md §12): dashboard, unified
  * exception queue, batch/row detail, row review actions, batch resume, manual-hidden override, and
- * layout-rule approval. Every endpoint is shop-scoped and gated by {@link ShopAccessService}, same
- * as every other admin controller in this codebase. No manual-upload endpoint here by design (Prompt
- * 07 scope explicitly excludes it - see prompts/07-operations-ui.md).
+ * layout-rule approval. Every endpoint is shop-scoped and gated by {@link AuthorizationService}
+ * (Stage 7): read endpoints accept any shop role (STAFF or higher), mutating endpoints require at
+ * least {@link MemberRole#ADMIN}. No manual-upload endpoint here by design (Prompt 07 scope
+ * explicitly excludes it - see prompts/07-operations-ui.md).
  */
 @RestController
 @RequestMapping("/api/shops/{shopId}/operations")
 @RequiredArgsConstructor
 public class ImportOperationsController {
 
-    private final ShopAccessService shopAccessService;
+    private final AuthorizationService authorizationService;
     private final ImportDashboardService importDashboardService;
     private final ImportExceptionQueueService importExceptionQueueService;
     private final ImportBatchDetailService importBatchDetailService;
     private final ImportRowReviewService importRowReviewService;
     private final ImportBatchResumeService importBatchResumeService;
+    private final ImportBatchApprovalService importBatchApprovalService;
     private final ProductVisibilityOverrideService productVisibilityOverrideService;
     private final ImportRuleVersionApprovalService importRuleVersionApprovalService;
 
@@ -62,7 +66,7 @@ public class ImportOperationsController {
             @PathVariable String shopId,
             @RequestParam(defaultValue = "24") int windowHours,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return ResponseEntity.ok(importDashboardService.buildDashboard(shopId, windowHours));
@@ -77,7 +81,7 @@ public class ImportOperationsController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return ResponseEntity.ok(PageResponse.from(
@@ -90,7 +94,7 @@ public class ImportOperationsController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return ResponseEntity.ok(PageResponse.from(
@@ -102,7 +106,7 @@ public class ImportOperationsController {
     @GetMapping("/batches/{batchId}")
     public ResponseEntity<?> getBatchDetail(
             @PathVariable String shopId, @PathVariable Long batchId, @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return importBatchDetailService.getBatchDetail(shopId, batchId)
@@ -118,7 +122,7 @@ public class ImportOperationsController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "50") int size,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return importBatchDetailService.listBatchRows(shopId, batchId, status, clampPage(page), clampSize(size))
@@ -129,7 +133,7 @@ public class ImportOperationsController {
     @GetMapping("/rows/{rowId}")
     public ResponseEntity<RowDetailResponse> getRowDetail(
             @PathVariable String shopId, @PathVariable Long rowId, @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasAccess(user, shopId)) {
             return ResponseEntity.status(403).build();
         }
         return importBatchDetailService.getRowDetail(shopId, rowId)
@@ -145,7 +149,7 @@ public class ImportOperationsController {
             @PathVariable Long rowId,
             @Valid @RequestBody RowReviewRequest request,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
         try {
@@ -163,7 +167,7 @@ public class ImportOperationsController {
     @PostMapping("/rows/bulk-review")
     public ResponseEntity<?> bulkReviewRows(
             @PathVariable String shopId, @Valid @RequestBody BulkRowReviewRequest request, @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
         try {
@@ -180,7 +184,7 @@ public class ImportOperationsController {
     @PostMapping("/batches/{batchId}/resume")
     public ResponseEntity<?> resumeBatch(
             @PathVariable String shopId, @PathVariable Long batchId, @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
         try {
@@ -196,6 +200,35 @@ public class ImportOperationsController {
 
     private ResponseEntity<?> batchResumeResponse(ImportBatch batch) {
         return ResponseEntity.ok(Map.of("batchId", batch.getId(), "status", batch.getStatus()));
+    }
+
+    // ========== Stage 2: NEEDS_ATTENTION -> APPROVED ==========
+
+    @PostMapping("/batches/{batchId}/approve")
+    public ResponseEntity<?> approveBatch(
+            @PathVariable String shopId, @PathVariable Long batchId, @AuthenticationPrincipal AdminUser user) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
+            return ResponseEntity.status(403).build();
+        }
+        try {
+            return importBatchApprovalService.approve(shopId, batchId, user)
+                    .<ResponseEntity<?>>map(this::batchApproveResponse)
+                    .orElseGet(() -> ResponseEntity.notFound().build());
+        } catch (RowVersionConflictException e) {
+            return ResponseEntity.status(409).body(new VersionConflictResponse(e.getMessage(), e.getCurrentVersion()));
+        } catch (RowReviewException e) {
+            return ResponseEntity.badRequest().body(new ErrorResponse("INVALID_ACTION", e.getMessage()));
+        }
+    }
+
+    private ResponseEntity<?> batchApproveResponse(ImportBatch batch) {
+        return ResponseEntity.ok(new BatchApproveResponse(
+                batch.getId(), batch.getStatus(), batch.getApprovedByUserId(), batch.getApprovedByEmail(), batch.getApprovedAt()));
+    }
+
+    public record BatchApproveResponse(
+            Long batchId, com.plstk.loyaltybot.entity.importing.ImportBatchStatus status,
+            Long approvedByUserId, String approvedByEmail, java.time.LocalDateTime approvedAt) {
     }
 
     // ========== Pagination guards ==========
@@ -225,7 +258,7 @@ public class ImportOperationsController {
             @PathVariable Long productId,
             @Valid @RequestBody ManualHiddenRequest request,
             @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
         return productVisibilityOverrideService.setManualHidden(shopId, productId, request.hidden())
@@ -238,7 +271,7 @@ public class ImportOperationsController {
     @PostMapping("/rule-versions/{ruleVersionId}/approve")
     public ResponseEntity<?> approveRuleVersion(
             @PathVariable String shopId, @PathVariable Long ruleVersionId, @AuthenticationPrincipal AdminUser user) {
-        if (!shopAccessService.hasAccess(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.ADMIN)) {
             return ResponseEntity.status(403).build();
         }
         try {

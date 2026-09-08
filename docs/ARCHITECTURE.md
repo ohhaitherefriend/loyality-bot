@@ -921,10 +921,13 @@ shadow-mode acceptance перед включением autoApply для ново
 - [Tool Calls / schema](https://api-docs.deepseek.com/guides/tool_calls/)
 - [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)
 
-## 22. Production deployment: env vars, метрики, backup (Prompt 09)
+## 22. Production deployment: env vars, метрики, backup (Prompt 09, обновлено Stage 6/10)
 
-Написано во время hardening (см. ADR-009 в `docs/DECISIONS.md`). Ничего здесь не описывает новую
-функциональность — только то, как безопасно эксплуатировать то, что уже построено в Prompt 01-08.
+Написано во время hardening (см. ADR-009 в `docs/DECISIONS.md`), существенно обновлено во время
+второго hardening-раунда (Stage 1-10 "automatic supplier-import hardening", ADR-012…021). Секции
+ниже отражают **текущее** состояние — там, где Stage 6/10 изменили что-то из Prompt 09 (Flyway,
+storage provider, backup automation, health probes), старый текст заменён, а не оставлен рядом как
+история (история — в `docs/DECISIONS.md`, не здесь).
 
 ### Disabled-by-default AI/mailbox providers
 
@@ -948,10 +951,14 @@ credential — это уже реализовано в Prompt 02/03/05 (`Supplie
 | `ENCRYPTION_KEY` | AES-256-GCM для `TokenEncryptionService` (mailbox secrets, admin webhooks) | — | да |
 | `ADMIN_SECRET_CODE` | bootstrap admin auth | — | да |
 | `SCHEDULING_POOL_SIZE` | размер общего `@Scheduled` thread pool (все supplier-import jobs + loyalty cron) | `10` | нет |
-| `SUPPLIER_IMPORT_STORAGE_PATH` | база immutable file storage (`LocalImportFileStorage`) | `./data/import-files` (dev) | да, если mailbox/manual upload включены — должен указывать на persisted volume |
+| `SUPPLIER_IMPORT_STORAGE_PROVIDER` | `local` (default, single-replica) или `s3` (Stage 10/ADR-014, **обязателен** для multi-replica) | `local` | нет, но `s3` обязателен при >1 реплики |
+| `SUPPLIER_IMPORT_STORAGE_PATH` | база immutable file storage (`LocalImportFileStorage`), только при `provider=local` | `./data/import-files` (dev) | да, если mailbox/manual upload включены и `provider=local` — должен указывать на persisted volume |
+| `SUPPLIER_IMPORT_S3_BUCKET`/`_REGION`/`_ENDPOINT`/`_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/`_PATH_STYLE_ACCESS`/`_KEY_PREFIX` | `S3ImportFileStorage` config, только при `provider=s3` (Stage 10/ADR-014) | см. `application.yml` | да, если `provider=s3` (минимум `_BUCKET`) |
+| `SUPPLIER_IMPORT_RETENTION_ENABLED`/`_FILE_DAYS` | Stage 10/ADR-015 opt-in удаление blob'ов терминальных batch старше N дней (metadata/audit никогда не удаляются) | `false`/`180` | нет |
 | `SUPPLIER_IMPORT_MAX_FILE_SIZE_BYTES` | лимит размера вложения/upload | `31457280` (30 MiB) | нет |
 | `SUPPLIER_IMPORT_DEEPSEEK_API_KEY` | DeepSeek layout+matcher | (пусто → disabled providers) | нет, но нужен для AI-стадий |
-| `SUPPLIER_IMPORT_DEEPSEEK_MODEL`/`_BASE_URL`/`_TIMEOUT_MS`/`_MAX_RETRIES`/`_RETRY_BACKOFF_MS` | DeepSeek HTTP client tuning | `deepseek-chat`/`https://api.deepseek.com`/`20000`/`2`/`500` | нет |
+| `SUPPLIER_IMPORT_DEEPSEEK_MODEL`/`_BASE_URL`/`_CONNECT_TIMEOUT_MS`/`_TIMEOUT_MS`/`_MAX_RETRIES`/`_RETRY_BACKOFF_MS` | dedicated `DeepSeekHttpClient`/`deepSeekRestTemplate` tuning (Stage 5/ADR-011) | `deepseek-v4-flash`/`https://api.deepseek.com`/`5000`/`20000`/`2`/`500` | нет |
+| `SUPPLIER_IMPORT_DEEPSEEK_MAX_CONCURRENT_REQUESTS`/`_CONCURRENCY_ACQUIRE_TIMEOUT_MS`/`_CIRCUIT_BREAKER_FAILURE_THRESHOLD`/`_CIRCUIT_BREAKER_OPEN_DURATION_MS` | DeepSeek concurrency limiter + circuit breaker (Stage 5/ADR-011) | `4`/`3000`/`5`/`30000` | нет |
 | `SUPPLIER_IMPORT_PARSER_MAX_SHEETS`/`_MAX_ROWS`/`_MAX_COLUMNS`/`_MAX_CELL_LENGTH` | POI parser bounds (защита от zip-bomb/огромных файлов — Apache POI сам ограничивает inflate ratio при чтении `.xlsx`, эти лимиты — дополнительный backend-side guard на строки/колонки/длину ячейки после распаковки) | `10`/`20000`/`200`/`4000` | нет |
 | `SUPPLIER_IMPORT_MATCHING_*` | fuzzy threshold/AI gate config (ADR-004/005) | см. `application.yml` | нет |
 | `SUPPLIER_IMPORT_RECONCILIATION_*` | batch apply guards (ADR-006, D-012) | см. `application.yml` | нет |
@@ -975,56 +982,91 @@ non-health/info actuator endpoints требуют аутентификации (
 - `supplier_import_batch_validation_total{decision=auto_approved|needs_attention|quarantined}`
 - `supplier_import_batch_apply_total{result=applied|failed}`
 - `supplier_import_job_claim_total{job_type=...,result=claimed|contended}`
+- `supplier_import_retention_deletion_total{result=deleted|failed}` (Stage 10/ADR-015)
+- `supplier_import_deepseek_circuit_breaker_state` — gauge, 0=CLOSED/1=OPEN/2=HALF_OPEN
+  (Stage 10/ADR-018; registered by `DeepSeekCircuitBreaker` itself, not `SupplierImportMetrics`)
 
-Рекомендуемые alert-правила (не настроены в этом prompt — Prometheus/Alertmanager конфиг живёт вне
-репозитория, но именно эти сигналы уже экспортируются и готовы к подключению):
+**Alert-правила теперь реальный Prometheus rule-file, не только рекомендация в тексте**
+(Stage 10/ADR-018): `docs/monitoring/prometheus-alerts.yml`. Точечно подключить: добавить его в
+`rule_files` вашего Prometheus и настроить Alertmanager routing (вне репозитория, D-002). Файл
+покрывает batch-apply failures, no-successful-batch-24h, circuit breaker stuck open, retention
+deletion failures, repeated mailbox poll failures, и generic app-health (scrape-down, 5xx rate,
+HikariCP pool exhaustion, readiness — последний требует отдельно развёрнутый `blackbox_exporter`,
+см. комментарий в самом файле).
 
-- рост `batch_validation_total{decision="quarantined"}` относительно `auto_approved` за окно —
-  guard'ы (ADR-006) начали срабатывать чаще, чем ожидается;
-- `mailbox_poll_total{result="failure"}` > 0 несколько циклов подряд для одного mailbox —
-  IMAP-подключение деградировало;
-- `ai_call_total{result="failure"}` растёт без соответствующего роста `retryable_failure` —
-  content-level, не transport-level деградация (malformed/invalid AI-ответы);
-- `job_claim_total{result="contended"}` стабильно высок для job type, который должен идти на одной
-  реплике — lease (`*_LEASE_SECONDS`) короче реального времени выполнения.
+### Health/readiness probes и correlation IDs (Stage 10/ADR-016/018)
 
-### Backups
+- `/actuator/health/liveness`, `/actuator/health/readiness` — включены
+  (`management.health.{liveness,readiness}state.enabled`, `management.endpoint.health.probes.
+  enabled`), `permitAll` расширен с точного `/actuator/health` на `/actuator/health/**`
+  (`SecurityConfig`) так, чтобы orchestrator (Kubernetes readinessProbe/livenessProbe, или
+  аналогичный health-check в Docker/Nomad) мог их вызывать без аутентификации — тот же trust
+  boundary, что уже был у `/actuator/health`.
+- `/actuator/health` (агрегированный, `show-details: when-authorized`) включает contributor
+  `supplierImport` (`SupplierImportHealthIndicator`) — детали DeepSeek circuit breaker
+  (state/consecutive-failures/millis-since-opened). **Всегда `UP`** независимо от состояния
+  breaker'а — деградация DeepSeek не должна валить readiness/liveness всего приложения; для алертов
+  используйте gauge-метрику ниже, не этот индикатор.
+- Каждый HTTP-запрос получает correlation id (`CorrelationIdFilter`, самый первый в цепочке
+  фильтров) — либо переданный клиентом `X-Correlation-Id` (после basic sanity-проверки), либо
+  сгенерированный UUID; эхо в response header, доступен в логах через `%X{correlationId}`
+  (`logging.pattern.console` в обоих профилях) и очищается из MDC после каждого запроса. Не
+  распространяется на `@Scheduled` job'ы (пишут `OFF` вместо ID) и на исходящие HTTP-вызовы
+  (DeepSeek/CloudPayments/Telegram) — ограничение, см. `docs/DECISIONS.md` ADR-016.
+
+### Backups (автоматизировано в Stage 10/ADR-017 — `scripts/backup/`)
 
 Два независимых actor'а данных, оба нужны для восстановления:
 
 1. **PostgreSQL** (весь domain state — `Product`/`SupplierOffer`/`ImportBatch`/`ImportRow`/
-   `MailboxConnection.encryptedSecret` и т.д.). Стандартный `pg_dump`/`pg_basebackup`/managed-provider
-   snapshot — ничего supplier-import-специфичного не требуется, весь новый domain живёт в тех же
-   таблицах той же БД, что loyalty/commerce (D-002 модульный монолит). **Важно**: `encryptedSecret`
-   восстанавливается из backup только вместе с тем же `ENCRYPTION_KEY`, под которым он был
-   зашифрован — ротация `ENCRYPTION_KEY` без re-encryption делает старые mailbox-секреты
-   невосстанавливаемыми даже при успешном restore БД. Рекомендация: хранить `ENCRYPTION_KEY`
-   отдельно от БД-backup (secret manager), но с той же retention-политикой.
-2. **`SUPPLIER_IMPORT_STORAGE_PATH`** (immutable original XLSX/XLS файлы, `LocalImportFileStorage`).
-   Не хранится в БД — обычный filesystem-backup (rsync/snapshot volume) отдельно от Postgres backup.
-   Файлы immutable и content-addressed (SHA-256 в пути) — инкрементальный backup дёшев (новый файл
-   = новый объект, старые никогда не изменяются/не перезаписываются). `docker-compose.prod.yml`
-   монтирует именованный volume (`import_files`) специально для этого — без него содержимое
-   исчезает при пересоздании контейнера, а PostgreSQL всё равно продолжит ссылаться на
-   `storageKey`, которого больше нет на диске (`ImportFileStorage.open` бросит `IOException` при
-   попытке повторного parse/resume уже принятого файла).
+   `MailboxConnection.encryptedSecret` и т.д.). `scripts/backup/pg-backup.sh` — `docker exec ...
+   pg_dump -Fc` (custom format — совместим с `pg_restore --clean --if-exists`,
+   `scripts/backup/pg-restore.sh`) в `$BACKUP_DIR`, с проверкой на подозрительно маленький файл и
+   retention по количеству дней (`RETENTION_DAYS`, default 14). Предназначен для host-cron, не
+   запуска внутри app-контейнера. **Важно**: `encryptedSecret` восстанавливается из backup только
+   вместе с тем же `ENCRYPTION_KEY`, под которым он был зашифрован — ротация `ENCRYPTION_KEY` без
+   re-encryption делает старые mailbox-секреты невосстанавливаемыми даже при успешном restore БД.
+   Рекомендация: хранить `ENCRYPTION_KEY` отдельно от БД-backup (secret manager), но с той же
+   retention-политикой.
+2. **Import file blobs** (`SUPPLIER_IMPORT_STORAGE_PATH` при `provider=local`, либо S3-бакет при
+   `provider=s3` — Stage 10/ADR-014). При `provider=s3`: durability/versioning — ответственность
+   самого S3-бакета (bucket versioning/replication), не отдельный скрипт в этом репозитории. При
+   `provider=local`: обычный filesystem-backup (rsync/snapshot volume) отдельно от Postgres backup
+   — не автоматизирован отдельным скриптом (generic "backup a Docker volume", без специфики
+   supplier-import), команда-пример — в комментарии `pg-backup.sh`. Файлы immutable и
+   content-addressed (SHA-256 в пути) — инкрементальный backup дёшев. `docker-compose.prod.yml`
+   монтирует именованный volume (`import_files`) — без него содержимое исчезает при пересоздании
+   контейнера, а PostgreSQL всё равно продолжит ссылаться на `storageKey`, которого больше нет на
+   диске (`ImportFileStorage.open` бросит `IOException` при попытке повторного parse/resume уже
+   принятого файла).
 
-Restore-порядок: (1) restore Postgres snapshot, (2) restore `import-files` volume/filesystem
-snapshot **с той же или более ранней временной точкой**, чем (1) — если файловый backup новее
-snapshot БД, в БД могут отсутствовать строки `import_files`, ссылающиеся на файлы, которых restore
-БД не знает (не критично — просто orphan файлы на диске), но не наоборот: БД не должна ссылаться на
-`storageKey`, отсутствующий в файловом backup.
+Restore-порядок (local storage): (1) restore Postgres snapshot, (2) restore `import-files`
+volume/filesystem snapshot **с той же или более ранней временной точкой**, чем (1) — если файловый
+backup новее snapshot БД, в БД могут отсутствовать строки `import_files`, ссылающиеся на файлы,
+которых restore БД не знает (не критично — просто orphan файлы на диске), но не наоборот: БД не
+должна ссылаться на `storageKey`, отсутствующий в файловом backup. При `provider=s3` эта
+координация не нужна — бакет не пересоздаётся вместе с restore БД.
 
-Retention не специфична для этого домена — стандартная политика проекта (не описана здесь, так как
-это infra-decision, а не supplier-import-specific).
+Retention для import file blobs теперь опциональна и supplier-import-специфична —
+`ImportRetentionJob` (Stage 10/ADR-015, disabled by default, `SUPPLIER_IMPORT_RETENTION_*`).
+Retention для самих backup-файлов (Postgres dumps) — `RETENTION_DAYS` в `pg-backup.sh`, не
+связана с ImportRetentionJob.
 
-### ddl-auto/Flyway (unchanged decision, подтверждено этим prompt)
+### ddl-auto/Flyway (изменено в Stage 6/ADR-012/013 — уже не unchanged decision)
 
-Flyway остаётся выключен в обоих профилях (`spring.flyway.enabled: false`); фактическая схема во
-всех окружениях — Hibernate `ddl-auto: update` из JPA `@Entity`/`@Index`-аннотаций, включая новые
-composite-индексы `idx_import_rows_shop_id_status`/`idx_import_batches_shop_id_status`, добавленные
-этим prompt (`ImportRow`/`ImportBatch`, задокументированы как целевая Postgres DDL в
-`V23__add_hardening_indexes.sql` — тот же паттерн non-applied migration, что V17-V22, см. ADR-001
-п.1). Переключение на `ddl-auto: validate`/Flyway-managed schema остаётся отдельным, ещё не принятым
-решением (production baseline не подтверждён — тот же блокер, что в audit/ADR-001), а не regressed
-этим prompt.
+**Flyway теперь включён в обоих профилях** (`spring.flyway.enabled: true`); в `prod`,
+`spring.jpa.hibernate.ddl-auto` — `validate`, не `update` — Hibernate больше не патчит
+production-схему на каждом деплое, а падает при старте, если entity-маппинг и реально
+смигрированная схема расходятся. `baseline-on-migrate: true` +
+`baseline-version: ${FLYWAY_BASELINE_VERSION:23}` — одноразовый факт про cutover существующих
+production-БД (которые были на Hibernate `ddl-auto: update` до `V23` включительно); свежие
+окружения вместо baseline проходят весь чейн от нового `V0__baseline_schema.sql`. `V24` и далее —
+первые migration-файлы, которые реально выполняются в production (Stage 1-4 fields, `snapshot_scope`
+identity fix, `brand_aliases`, `pg_trgm` safety net, Stage 10 retention column). Подробности и
+обоснование — `docs/DECISIONS.md` ADR-013; `FlywayPostgresSchemaTest` (real PostgreSQL
+Testcontainer) — единственный тест, гоняющий весь чейн `V0..latest` против настоящего Postgres.
+
+JSON-поля (`ImportFile.sourceIdentity`, `ImportRow.rawData/normalizedData/candidateSearchResult`,
+`ImportRuleVersion.ruleDefinition`, `MatchDecision.candidateProductIds/conflicts`) остаются `TEXT`,
+не переведены на native `jsonb` — это осознанная, пересмотренная и подтверждённая Stage 6 позиция
+(не забытый TODO), причины — `docs/DECISIONS.md` ADR-012.

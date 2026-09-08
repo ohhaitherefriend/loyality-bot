@@ -18,7 +18,7 @@ import { useShopStore } from '@/lib/store'
 import { formatDateTime } from '@/lib/utils'
 import { toast } from '@/components/ui/use-toast'
 
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'

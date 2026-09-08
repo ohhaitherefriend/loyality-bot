@@ -1526,10 +1526,8 @@ DTO leaks), с исправлением найденного Critical/High и б
    любого дальнейшего чтения ранее загруженных entity в той же транзакции) это безопасно; будущий
    рефакторинг, вызывающий эти методы раньше в более длинной транзакции, должен явно перепроверить,
    что ничего после вызова не полагается на уже managed entity, загруженный раньше.
-4. **Timeout dead-config (`supplier-import.ai.deepseek.timeout-ms`) не исправлен, только
-   задокументирован** — DeepSeek вызовы всё ещё используют общий 30s read timeout, разделяемый с
-   Telegram/оплатами/поиском изображений; отдельный `RestTemplate` для DeepSeek — валидный future
-   fix, вне scope этого prompt (не supplier-import-only изменение).
+4. ~~**Timeout dead-config (`supplier-import.ai.deepseek.timeout-ms`) не исправлен, только
+   задокументирован**~~ — **Resolved, см. ADR-011 (Stage 5) ниже.**
 5. **Все находки этого review — статический код-ревью одним ревьюером (AI-агентом) без внешнего
    security-review/pentest** — не заменяет отдельный `security-review`/`bugbot` проход, если он
    требуется процессом релиза.
@@ -1541,4 +1539,627 @@ DTO leaks), с исправлением найденного Critical/High и б
 7. **Накопленные ограничения Prompt 01-09 не переисследованы заново в этом prompt** (только
    упомянуты/подтверждены релевантные) — см. §6 `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` и
    `docs/STATE.md` за полным списком.
+
+## ADR-011 — Automatic supplier-import hardening, Stage 5: DeepSeek default model + dedicated hardened HTTP client (2026-09-06)
+
+### Контекст
+
+Продолжение 10-stage production-hardening review (Stage 1-4: `SupplierSource` PATCH/graduate,
+`NEEDS_ATTENTION` approve, FULL snapshot `snapshotScope` identity fix, large-catalog matching +
+brand aliases). Stage 5 closes two limitations documented since ADR-009/ADR-010:
+`supplier-import.ai.deepseek.timeout-ms` was dead config (both DeepSeek callers shared the
+app-wide `RestTemplate`/`RestTemplateConfig`, fixed 10s/30s), and there was no circuit breaker —
+a fully-down DeepSeek account made every row/batch burn its own full retry budget instead of
+failing fast.
+
+### Решение
+
+- **`SupplierImportProperties.DeepSeek.model` default → `deepseek-v4-flash`** (was
+  `deepseek-chat`), still fully overridable via `SUPPLIER_IMPORT_DEEPSEEK_MODEL`. Same rename applied
+  to `docker-compose.prod.yml`/`application.yml` defaults; `env.example` now documents the full
+  `SUPPLIER_IMPORT_DEEPSEEK_*` set (previously undocumented there).
+- **New `DeepSeekClientConfig` bean (`deepSeekRestTemplate`)** — a dedicated `RestTemplate`,
+  separate from the shared Telegram/payments/image-search client, with its own connect
+  (`connectTimeoutMs`, new field, default 5000) and read (`timeoutMs`, now actually wired, default
+  20000) timeouts, both from `supplier-import.ai.deepseek.*`.
+- **New `DeepSeekHttpClient`** (shared by `DeepSeekCatalogMatcher`/`DeepSeekSpreadsheetLayoutDetector`,
+  both now reduced to prompt-building + outcome-mapping only):
+  - Exponential backoff with jitter (`retryBackoffMs * 2^(attempt-1)` + random 0-50% jitter, capped
+    at 60s), same retryable/non-retryable transport classification as before (timeout/429/5xx retry,
+    4xx/parse errors don't).
+  - Honors an HTTP `Retry-After` response header on 429 (seconds or HTTP-date form) instead of
+    guessing, when the provider sends one.
+  - **`DeepSeekCircuitBreaker`** — one JVM-wide singleton (layout detection + catalog matching share
+    one DeepSeek account/rate limit, so a failure in one is a signal about the other). Opens after
+    `circuitBreakerFailureThreshold` (default 5) consecutive failed calls (each call's own retries
+    already exhausted); while open, further calls fail fast (`retryable=true`, no HTTP request) for
+    `circuitBreakerOpenDurationMs` (default 30s), then lets exactly one half-open trial call through
+    to probe recovery — success closes the circuit, failure re-opens it.
+  - **Concurrency limiter** — a `Semaphore` sized by `maxConcurrentRequests` (default 4), shared
+    across both callers, bounding in-flight DeepSeek HTTP calls per JVM instance. A call that cannot
+    acquire a slot within `concurrencyAcquireTimeoutMs` (default 3000) fails fast (retryable) rather
+    than queuing indefinitely.
+- All new fields optional with safe defaults in `SupplierImportProperties.DeepSeek`; app still starts
+  fine with DeepSeek fully unconfigured (Disabled* no-ops, unchanged from ADR-003/005).
+
+### Тесты
+
+`DeepSeekCircuitBreakerTest` (new — CLOSED/OPEN/HALF_OPEN transitions, half-open single-trial
+exclusivity, success/failure resets), `DeepSeekHttpClientTest` (new — circuit opens after threshold
+and fails fast without a further HTTP call, successful call keeps circuit closed, `Retry-After: 0`
+short-circuits a deliberately long exponential backoff, concurrency limit reached fails fast as
+retryable without an extra HTTP call), `DeepSeekCatalogMatcherTest`/`DeepSeekSpreadsheetLayoutDetectorTest`
+(updated constructor wiring through `DeepSeekHttpClient`, all prior retry/backoff/content-passthrough
+cases unchanged and still green). `mvn test` — 272/272 green. `npm run build` (admin-panel, unrelated
+to this stage) — success.
+
+### Осознанные ограничения этого stage
+
+1. **Circuit breaker/concurrency limiter state is per-JVM-instance, not shared across replicas** — a
+   multi-replica deployment would each maintain their own breaker/limiter; acceptable for the current
+   single-scheduler-instance assumption documented elsewhere (`docs/ARCHITECTURE.md` §22 job
+   claim/lease design), revisit if/when true multi-replica AI-calling concurrency is introduced.
+2. **`deepseek-v4-flash` is a forward-looking default model name** — DeepSeek's actual current model
+   catalog should be re-verified against `https://api-docs.deepseek.com/` before enabling a live key
+   in production; the app never hardcodes a model choice in code, so re-pointing via
+   `SUPPLIER_IMPORT_DEEPSEEK_MODEL` requires no redeploy.
+3. **No real-DeepSeek-account integration test** (unchanged from ADR-005/009) — all retry/circuit
+   breaker/concurrency behavior is verified against `MockRestServiceServer`, never a live endpoint.
+
+## ADR-012 — Automatic supplier-import hardening, Stage 6: TEXT-not-JSONB is a deliberate, revisited decision (2026-09-06)
+
+### Контекст
+
+ADR-001 §2 deferred a decision: JSON-shaped columns (`ImportFile.sourceIdentity`,
+`ImportRow.rawData/normalizedData/candidateSearchResult`, `ImportRuleVersion.ruleDefinition`,
+`MatchDecision.candidateProductIds/conflicts`) were mapped as plain `@Column(columnDefinition =
+"TEXT") String` "until Flyway is enabled for production, at which point migrating to real `jsonb`
+should be decided together with that cutover." Stage 6 is that cutover (see ADR-013) — so this ADR
+is the promised revisit, not a new problem.
+
+### Решение
+
+**Keep TEXT, do not migrate to native `jsonb`.** Reasons, made explicit here so a future prompt
+doesn't silently "fix" this without re-reading why:
+
+1. **No code anywhere parses these columns as structured JSON at the database level.** Every
+   reader either deserializes the whole string with `ObjectMapper` in Java (normal case) or never
+   reads it back at all (e.g. `sourceIdentity` is audit-only). Nothing uses Postgres JSON operators
+   (`->`, `->>`, `@>`, `jsonb_path_query`, GIN-on-jsonb indexes) — moving to `jsonb` would buy zero
+   query capability today, only migration risk.
+2. **`jsonb` is a real behavior change, not just a column-type rename.** Postgres's JDBC driver
+   rejects binding a plain `String`/`VARCHAR` parameter into a `jsonb` column without either a
+   custom `AttributeConverter`/`@JdbcTypeCode(SqlTypes.JSON)` in every affected entity, or an
+   explicit `::jsonb` cast on every write path (native queries included). H2 (dev/test) has no
+   `jsonb` type at all, so the entity mapping would necessarily diverge between test and prod
+   dialects — the opposite of what `FlywayPostgresSchemaTest` (ADR-013) exists to catch.
+3. **Existing rows in a real production database would need a one-time backfill/cast
+   (`ALTER COLUMN ... TYPE jsonb USING column::jsonb`) that fails hard on any row that isn't valid
+   JSON.** Nothing in this codebase currently guarantees every historical `TEXT` value is
+   well-formed JSON (e.g. `sourceIdentity` free-form fallback strings, see
+   `MailboxPollingService.buildSourceIdentity`'s catch-all branch) — a blind cast is a production
+   outage risk for zero measured benefit (§1).
+4. Kept **consistent across every migration file that creates or touches one of these columns**
+   (`V17`, `V19`, `V24`) — each carries the same rationale comment pointing back here, so the
+   decision doesn't quietly drift column-by-column.
+
+If a future prompt introduces an actual need to query inside these blobs at the SQL level (e.g. a
+dashboard filter on a `normalizedData` attribute), that is the point to revisit — with a real
+`AttributeConverter`/`@JdbcTypeCode`, a backfill migration with a `CHECK (jsonb_typeof(col::jsonb)
+IS NOT NULL)` validation pass first, and updated `FlywayPostgresSchemaTest` coverage. Not before.
+
+### Осознанные ограничения
+
+1. Postgres's native JSON containment/indexing operators remain unavailable on these columns —
+   any future query need must either extract the field into its own typed column, or trigger the
+   `jsonb` migration described above; there is no cheap partial migration.
+
+## ADR-013 — Automatic supplier-import hardening, Stage 6: enable Flyway for production with a baseline cutover (2026-09-06)
+
+### Контекст
+
+Every prior ADR (001-011) documented the same standing blocker: `spring.flyway.enabled: false` in
+both profiles, with `V17`-`V23` written as target PostgreSQL DDL that was never actually executed —
+the real schema in every environment (dev/test H2, prod Postgres) came exclusively from Hibernate
+`ddl-auto: update` inferring tables from JPA annotations on each boot. This was flagged repeatedly
+as a real production risk (unconfirmed baseline, `pg_trgm`/`snapshot_scope`/`brand_aliases`
+migrations all non-applied) but explicitly deferred each time as "a separate baseline decision, out
+of scope for this prompt." Stage 6 is that decision.
+
+### Решение
+
+- **`spring.flyway.enabled: true` in both profiles.** `application.yml` (dev/default, H2) and
+  `application-prod.yml` (Postgres) both now run the full Flyway migration chain on startup.
+- **`spring.jpa.hibernate.ddl-auto` changed from `update` to `validate` in `application-prod.yml`.**
+  Hibernate no longer silently patches the production schema on every deploy — it fails startup
+  loudly if any entity mapping disagrees with what Flyway actually created. (Dev/`application.yml`
+  keeps `update` for local iteration speed — no production risk there, H2 is thrown away between
+  runs anyway.)
+- **`baseline-on-migrate: true` + `baseline-version: ${FLYWAY_BASELINE_VERSION:23}` — a one-time
+  historical fact about *this specific* cutover, not a general-purpose knob.** Any already-deployed
+  production database was schema-managed by Hibernate `ddl-auto: update` through `V23`'s logical
+  content (i.e. it already has every table/column/index that `V1`-`V23` describe, just never via
+  Flyway). `baseline-on-migrate` tells Flyway "trust that this database is already at V23, record
+  that as a fact, then run `V24` onward for real." A **fresh** environment (new dev machine,
+  Testcontainers, a brand-new prod deployment) has no pre-existing schema at all, so Flyway instead
+  runs the **entire chain from `V0`** (see next point) — `baseline-on-migrate` is a no-op there
+  because there's no pre-existing `flyway_schema_history` gap to bridge.
+- **New `V0__baseline_schema.sql`** — the actual, complete schema (every table this application has
+  ever created via Hibernate, as of this cutover), generated by a one-off dev tool
+  (`SchemaBaselineGenerator`, kept in `src/test` since it's a generation script, not production
+  code) that introspects a live Hibernate-managed H2/Postgres schema and emits DDL. This is what
+  makes fresh environments and the `FlywayPostgresSchemaTest` (below) able to reach the exact same
+  end state as a baselined production database, instead of replaying 20+ migration files that
+  individually assumed a schema that already existed.
+- **`V17`-`V23` kept as-is, now annotated as "baselined away in prod, but the real, executed source
+  of truth for every fresh database."** They were already idempotent (`IF NOT EXISTS` throughout,
+  per ADR-001 §1) so re-running them against a schema `V0` already created is safe by construction;
+  not rewriting them preserves the historical record of what each Prompt actually shipped.
+- **`V24` onward are the first migrations that actually execute against a real production
+  database** — `V24__add_source_version_and_batch_approval_audit.sql` (Stage 1/2 fields),
+  `V25__fix_supplier_offer_snapshot_scope_identity.sql` (Stage 3), `V26__add_brand_aliases.sql`
+  (Stage 4), `V27__ensure_pg_trgm_extension_and_indexes.sql` (safety net — re-asserts `pg_trgm` for
+  real, since `V19`'s `CREATE EXTENSION` was never actually applied in prod pre-baseline), `V28`
+  (Stage 10 retention column).
+- **`FLYWAY_BASELINE_VERSION` env var** — overridable only for the documented historical case of
+  restoring a very old backup that predates `V23`; `env.example` explicitly warns against changing
+  it otherwise.
+
+### Тесты
+
+**`FlywayPostgresSchemaTest`** (new) — the first test in this repository to run against a real
+PostgreSQL container (Testcontainers `postgres:15-alpine`), not H2: runs the *entire* migration
+chain from empty (`baseline-on-migrate: false` here — this test always starts from zero, unlike
+prod) through the latest version, then lets Hibernate's `ddl-auto: validate` confirm every JPA
+entity mapping matches the resulting real-Postgres schema. This is the one place that would have
+caught a migration using non-Postgres syntax, a `jsonb`/`TEXT` mismatch (see ADR-012), or an entity
+field with no matching column — none of which H2-only tests could ever detect. Also asserts the
+Stage 3 (`snapshot_scope` NOT NULL) and Stage 4 (`brand_aliases` table) migrations are present in
+the applied chain.
+
+### Осознанные ограничения
+
+1. **Requires a local Docker daemon** to run `FlywayPostgresSchemaTest` — same class of requirement
+   as `ImapMailboxClientGreenMailTest`'s embedded server, but Docker specifically (CI runners
+   generally provide this out of the box; a developer machine without Docker will see this one test
+   class fail/skip rather than the whole suite).
+2. **`baseline-version: 23` is a real production-history fact about environments that exist at the
+   time of this cutover** — if a production database were somehow behind even `V17` (extremely
+   unlikely given how long `ddl-auto: update` has been running), the baseline would be wrong and
+   `V24`+ could fail against a schema missing earlier tables. Not detectable from the code alone;
+   an operator restoring a genuinely ancient backup must consult `FLYWAY_BASELINE_VERSION`'s
+   `env.example` guidance first.
+3. **`V0__baseline_schema.sql` was generated once, by hand-review of `SchemaBaselineGenerator`
+   output** — it is not re-generated automatically on every entity change; a future entity change
+   goes into a new versioned migration (`V29`+), never by editing `V0` retroactively.
+
+## ADR-014 — Automatic supplier-import hardening, Stage 10: S3-compatible storage for multi-replica deployments (2026-09-06)
+
+### Контекст
+
+`LocalImportFileStorage` (ADR-001) writes immutable, content-addressed XLSX/XLS blobs under
+`supplier-import.storage.base-path` on the local filesystem of whichever container/host handles a
+given request. ADR-009 §22 already flagged this as needing a shared filesystem/volume for
+multi-replica deployments and left it unaddressed. Stage 10 closes it by making S3-compatible
+object storage a first-class, opt-in alternative rather than requiring every deployment to solve
+shared-filesystem mounting itself.
+
+### Решение
+
+- **`ImportFileStorage` interface unchanged in shape**, plus one new method: `void
+  delete(String storageKey)` (needed by the Stage 10 retention job, ADR-015 — `Local` and `S3`
+  implementations both got it at the same time since neither previously needed to delete anything).
+- **New `S3ImportFileStorage`** (AWS SDK v2, `software.amazon.awssdk:s3` +
+  `:url-connection-client` only — deliberately excludes the Netty/Apache HTTP clients transitively
+  pulled in by the S3 module's default, since this app makes simple sequential put/get/head/delete
+  calls, not high-throughput async traffic). Implements `store`/`open`/`exists`/`delete` with the
+  same content-addressed key scheme as `LocalImportFileStorage`, optionally prefixed by
+  `supplier-import.storage.s3.key-prefix` (lets one bucket be shared across environments/shops
+  without collision).
+- **New `ImportFileStorageConfig`** (`@ConditionalOnProperty(supplier-import.storage.provider)`) —
+  wires exactly one of `LocalImportFileStorage` (default, `provider=local`) or `S3ImportFileStorage`
+  (`provider=s3`) as the `ImportFileStorage` bean; `LocalImportFileStorage` lost its own
+  `@Service` annotation so this config is the single place that decides. `S3Client` credentials:
+  static (`access-key-id`/`secret-access-key`, if both non-blank) or the default AWS credential
+  provider chain (env/instance profile/etc) otherwise; `endpoint` override + `path-style-access`
+  cover MinIO/other S3-compatible providers, both ignored for real AWS S3.
+- **Zero behavior change for existing single-replica deployments** — `provider` defaults to
+  `local`, exactly today's behavior; switching to S3 is an explicit operator decision via
+  `SUPPLIER_IMPORT_STORAGE_PROVIDER=s3` plus bucket/credentials, never automatic.
+- App must still start with S3 fully unconfigured as long as `provider=local` (Zabotik commerce
+  rule: optional providers never block startup) — verified by the existing test suite continuing to
+  use `LocalImportFileStorage` by default; `S3ImportFileStorage` itself is only instantiated when
+  explicitly opted into.
+
+### Тесты
+
+`S3ImportFileStorageTest` (new — store/open/exists/delete round-trip against a fake/mocked
+`S3Client`, key-prefix behavior, `exists()` returning `false` on `NoSuchKeyException` rather than
+throwing). `LocalImportFileStorageTest` extended to cover the new `delete` method (delete then
+`exists()` is `false`; deleting an already-missing key is a no-op, not an exception — same contract
+both implementations must honor, since `ImportRetentionJob` (ADR-015) treats them identically).
+
+### Осознанные ограничения
+
+1. **No migration tool to move already-stored local blobs into S3** if an operator switches
+   `provider` on an existing deployment with local files already on disk — those files remain only
+   readable via the old `local` path; switching providers on a live deployment with un-migrated
+   history is an unsupported operation for now.
+2. **Not covered by an integration test against a real S3/MinIO instance** — `S3ImportFileStorageTest`
+   mocks the SDK client; the same class of limitation as every other "not tested against a real
+   external provider" risk already accumulated in ADR-002/005/009 (real IMAP/DeepSeek).
+
+## ADR-015 — Automatic supplier-import hardening, Stage 10: opt-in retention for old import file blobs (2026-09-06)
+
+### Контекст
+
+`LocalImportFileStorage`/`S3ImportFileStorage` (ADR-014) never delete anything on their own —
+storage usage only grows as suppliers send more price files over time. Stage 10 adds an explicit,
+opt-in mechanism for reclaiming that storage without ever losing the audit trail of what was
+imported.
+
+### Решение
+
+- **`ImportFile.storageDeletedAt`** (new nullable field) — marks that the underlying blob has been
+  deleted; the `ImportFile` row itself, and every `ImportBatch`/`ImportRow`/`MatchDecision` derived
+  from it, is **never** deleted. "Who imported what, when, and what happened to each row" remains
+  answerable forever, even after the raw spreadsheet bytes are gone — this was a hard constraint,
+  not a nice-to-have, since those rows are the only record of historical supplier pricing decisions.
+- **`ImportRetentionJob`** (`@Scheduled`, default daily) — disabled by default
+  (`supplier-import.storage.retention.enabled=false`); an operator must explicitly opt in, since
+  deleting historical supplier price files is an irreversible, business-impacting decision this
+  codebase must never make unilaterally. When enabled: finds terminal batches
+  (`APPLIED`/`QUARANTINED`/`FAILED`) whose `ImportFile.storageDeletedAt IS NULL` and
+  `finishedAt` is older than `fileRetentionDays` (default 180), capped at
+  `maxDeletionsPerSweep` (default 500) per run to bound one sweep's blocking storage calls, deletes
+  each blob via `ImportFileStorage.delete(...)`, then marks `storageDeletedAt`.
+- **Safe under multiple replicas without a claim/lease** (unlike every pipeline-stage job, which
+  uses `ImportJobClaimService`) — deleting an already-deleted storage key is a no-op by contract on
+  both `ImportFileStorage` implementations (ADR-014), and the `storage_deleted_at IS NULL`
+  predicate means a second replica racing the same row either finds it already marked (skips it via
+  the query) or marks it again with an equivalent timestamp — never double-charges a storage
+  provider or corrupts state.
+- **`supplier_import_retention_deletion_total{result=deleted|failed}` metric** — a rising `failed`
+  rate signals a storage backend problem (S3 credentials/bucket policy, stale local-disk mount) an
+  operator needs to see; alerted on in `docs/monitoring/prometheus-alerts.yml` (ADR-018).
+- **`V28__add_import_file_retention.sql`** — adds `storage_deleted_at TIMESTAMP NULL` to
+  `import_files` (`IF NOT EXISTS`, same idempotent pattern as every other post-baseline migration);
+  `V0__baseline_schema.sql` updated in parallel so fresh environments get the column from the start.
+
+### Тесты
+
+`ImportRetentionJobTest` (new, `@DataJpaTest`) — sweep is a no-op when disabled; deletes blobs for
+old terminal batches and marks `storageDeletedAt`; leaves recent terminal batches and any
+non-terminal (in-flight) batch untouched regardless of age; skips (does not re-delete or
+double-count) a batch whose file is already marked deleted.
+
+### Осознанные ограничения
+
+1. **`fileRetentionDays=180` is an arbitrary, uncalibrated default** — like every other threshold in
+   this codebase (ADR-004/005/006), not tuned against a real supplier's actual audit/compliance
+   retention requirements; an operator enabling this must set a value appropriate to their own
+   record-keeping obligations, not trust the default blindly.
+2. **No tooling to *restore* a deleted blob** — deletion is deliberately one-directional; the
+   `ImportBatch`/`ImportRow` audit trail explains what happened, but the original bytes are gone.
+   Operators who need long-term raw-file retention for compliance should keep retention disabled
+   (or set a very large `fileRetentionDays`) and rely on their own storage-layer archival instead.
+
+## ADR-016 — Automatic supplier-import hardening, Stage 10: correlation IDs for cross-request/log tracing (2026-09-06)
+
+### Контекст
+
+Every log line already carried a timestamp/level/logger/thread, but nothing tied together the
+several log lines a single HTTP request (or a `@Scheduled` job tick that fans out across multiple
+service calls) produces — debugging a specific reported failure meant grepping by approximate
+timestamp, not a stable identifier.
+
+### Решение
+
+- **`CorrelationIdFilter`** (`OncePerRequestFilter`, `@Order(HIGHEST_PRECEDENCE)` — runs before
+  Spring Security and everything else, so every log line for a request is covered, including
+  auth-rejection lines) — reads the caller-supplied `X-Correlation-Id` request header if present and
+  "safe" (bounded length, restricted character set — an attacker-controlled value ends up verbatim
+  in log lines and the MDC, so it must not enable log injection or unbounded memory use), otherwise
+  generates a new random UUID. Puts the value into SLF4J's MDC under `correlationId`, echoes it back
+  as an `X-Correlation-Id` response header (so a caller who didn't send one can still correlate
+  their own client-side logs with server logs), and always removes it from the MDC in a `finally`
+  block — including when the downstream filter chain throws, so a correlation ID never leaks across
+  threads via a pooled-thread MDC that's normally cleared per-request but wasn't this time.
+- **`logging.pattern.console`** (both `application.yml` and `application-prod.yml`) extended with
+  `[%X{correlationId:-OFF}]` — every log line now shows the correlation ID (or the literal `OFF` for
+  lines logged outside any request, e.g. `@Scheduled` job startup banners) without requiring a
+  structured/JSON log format change.
+- **Reused, not reinvented, for `@Scheduled` job tracing** — no changes to job code in this ADR;
+  correlation IDs cover HTTP requests only for now (see limitations).
+
+### Тесты
+
+`CorrelationIdFilterTest` (new) — reuses a caller-supplied header verbatim; generates a new UUID
+when absent; rejects an unsafe (control characters, wrong charset) or overlong header by generating
+a fresh ID instead of trusting it blindly; always clears the MDC afterward even when the filter
+chain throws (asserted via a chain stub that throws and then inspecting `MDC.get(...)` post-call).
+
+### Осознанные ограничения
+
+1. **`@Scheduled` pipeline jobs (mailbox poll, parse, normalize, match, validate, apply, retention)
+   do not get a correlation ID** — this ADR only wires the HTTP filter chain. A future prompt could
+   assign a per-job-tick or per-batch correlation ID inside each `*Job`/`*Service`, but that's a
+   separate, unimplemented piece of work, not silently covered by this one.
+2. **Correlation ID is not propagated to any downstream HTTP call this app makes** (DeepSeek,
+   CloudPayments, Telegram) — an operator correlating a slow/failed outbound call still needs the
+   request timestamp, not a shared ID, until a future prompt threads it through
+   `DeepSeekHttpClient`/etc.
+
+## ADR-017 — Automatic supplier-import hardening, Stage 10: automated PostgreSQL backup/restore scripts (2026-09-06)
+
+### Контекст
+
+ADR-009 §22/limitation §2 documented backup *guidance* (restore ordering between Postgres and the
+`import-files` volume, the `ENCRYPTION_KEY` dependency) but explicitly left automation out of scope
+("depends on where production is actually deployed, not part of that prompt's audit"). Stage 10
+provides the automation for the one deployment topology this repository actually ships a config
+for: `docker-compose.prod.yml`'s single-container Postgres.
+
+### Решение
+
+- **`scripts/backup/pg-backup.sh`** — `docker exec ... pg_dump -Fc` (custom format, not plain SQL:
+  enables `pg_restore`'s parallelism and selective-table restore, neither available from a plain
+  `.sql` dump) into `$BACKUP_DIR` (default `./backups`), sanity-checks the resulting file isn't
+  suspiciously small (a near-empty dump from a misconfigured container is worse than no backup at
+  all — it looks like success), then applies a simple day-count retention (`find ... -mtime
+  +$RETENTION_DAYS -delete`, default 14 days) so the backup directory doesn't grow unbounded.
+  Intended to run from host cron, not from inside the app container (backups must survive the app
+  container being redeployed/destroyed).
+- **`scripts/backup/pg-restore.sh`** — restores a `pg-backup.sh` dump via `pg_restore --clean
+  --if-exists` (drops every existing object first). Deliberately requires typing `yes` at an
+  interactive prompt before proceeding — this is destructive by design (full-database overwrite),
+  and the existing `scripts/*.sql` one-off maintenance scripts in this repository are similarly
+  guarded by requiring the operator to read and intend the exact command, not silently
+  scriptable-by-accident.
+- **Deliberately does not attempt to also back up the `import_files` volume** — that story branches
+  on ADR-014 (S3 vs local): S3-backed deployments already get durability/versioning from the bucket
+  itself; local-storage deployments need a separate `tar`/`rsync` of the named volume, documented as
+  a one-line command in the script's own header comment rather than a second script, since it's a
+  generic "backup a Docker volume" operation with nothing supplier-import-specific about it.
+
+### Осознанные ограничения
+
+1. **Not wired into any scheduler/cron by this ADR itself** — the scripts exist and are documented
+   (env vars, expected cron line) but an operator must actually install the cron entry; nothing in
+   the application automatically invokes them, matching how this repository has never run its own
+   infrastructure automation (D-002 modular monolith, no separate ops-orchestration layer).
+2. **Assumes the `docker-compose.prod.yml` container-name/DB-name conventions** (overridable via
+   `CONTAINER_NAME`/`POSTGRES_DB`/`POSTGRES_USER` env vars) — a materially different deployment
+   topology (managed Postgres, Kubernetes) would need different scripts or provider-native
+   snapshot tooling instead; not attempted here since this repository only ships the
+   docker-compose topology.
+3. **No automated restore-drill/verification** — nothing periodically proves a given backup file is
+   actually restorable; that remains a manual operational practice, not enforced by code.
+
+## ADR-018 — Automatic supplier-import hardening, Stage 10: health indicator, liveness/readiness probes, and Prometheus alert rules (2026-09-06)
+
+### Контекст
+
+ADR-009 already exported pipeline-health `Counter` metrics via `/actuator/prometheus`, but three
+gaps remained: (1) the DeepSeek circuit breaker's live state (ADR-011) was invisible to any
+monitoring system — only a JVM-internal enum; (2) `/actuator/health` reported a single UP/DOWN with
+no distinction between "the process is alive" and "the process is ready to serve traffic" (relevant
+for container orchestrators deciding whether to route traffic or restart a pod); (3) ADR-009 §22
+recommended alert rules only as prose in `ARCHITECTURE.md`, with no actual Prometheus config in the
+repository.
+
+### Решение
+
+- **`supplier_import_deepseek_circuit_breaker_state` gauge** — registered directly by
+  `DeepSeekCircuitBreaker` itself (0=CLOSED, 1=OPEN, 2=HALF_OPEN), via a `@Nullable MeterRegistry`
+  constructor parameter rather than changing `SupplierImportMetrics`'s constructor signature (which
+  every existing unit test across Stage 5 constructs directly with `new
+  SupplierImportMetrics(meterRegistry)` — widening that constructor would have forced updating every
+  one of those call sites for a metric unrelated to what most of them test). The plain
+  `new DeepSeekCircuitBreaker()` constructor every existing unit test already uses still works
+  unchanged (registry `null` → gauge registration skipped, no Micrometer dependency needed in those
+  tests); Spring supplies the real `MeterRegistry` in production via `@Autowired` constructor
+  selection.
+- **`SupplierImportHealthIndicator`** (new `HealthIndicator`) — surfaces the circuit breaker's
+  state/consecutive-failure-count/time-since-opened as *details* on a health check that always
+  reports `UP` itself. Deliberately never fails overall app health for this — a struggling DeepSeek
+  account is an operational signal to alert on (via the new gauge, see below), not a reason to make
+  Kubernetes/load balancers think the whole application is unhealthy and start killing/rerouting
+  pods that can otherwise serve every non-AI request perfectly well.
+- **`management.endpoint.health.probes.enabled` / `management.health.livenessstate.enabled` /
+  `management.health.readinessstate.enabled`: true** (both profiles) — enables Spring Boot's
+  built-in `/actuator/health/liveness` and `/actuator/health/readiness` endpoint groups.
+  `SecurityConfig`'s permitAll matcher widened from the exact `/actuator/health` path to
+  `/actuator/health/**` so these sub-paths are reachable by an orchestrator probe without
+  authentication (same trust boundary as the existing `/actuator/health`/`/actuator/info`
+  permitAll — no new information is exposed, `show-details: when-authorized` still gates the
+  detailed body).
+- **`docs/monitoring/prometheus-alerts.yml`** (new — actual Prometheus rule-file YAML, not prose) —
+  alert rules covering: batch-apply failures/no-successful-batch-in-24h (`supplier_import_batch_
+  apply_total`), the new circuit-breaker gauge staying OPEN for 5+ minutes, retention-deletion
+  failures (ADR-015), repeated mailbox poll failures, plus generic app-health rules (scrape-down,
+  5xx rate, HikariCP pool exhaustion) and an explicitly-documented readiness-probe alert that
+  requires pairing with `blackbox_exporter` (or an orchestrator's own native readiness probe)
+  since Spring Boot does not expose `AvailabilityState` as a Micrometer gauge out of the box.
+
+### Тесты
+
+`DeepSeekCircuitBreakerTest` extended — `withMeterRegistry_registersStateGaugeReflectingCurrentState`
+(gauge value transitions 0→1 as the breaker opens), `withNullMeterRegistry_stillWorksWithoutRegisteringGauge`
+(existing no-arg-constructor behavior is unchanged). `SupplierImportHealthIndicatorTest` — reports
+`UP` regardless of circuit breaker state, with the expected detail keys.
+
+### Осознанные ограничения
+
+1. **Alert *rules* are provided, but no Alertmanager/notification routing config is** — same
+   "infrastructure lives outside this modular-monolith repository" boundary as D-002; an operator
+   must point their own Prometheus at this rule file and configure where alerts actually go
+   (Slack/PagerDuty/email).
+2. **The `AppNotReady` alert requires `blackbox_exporter` (or equivalent) to be deployed
+   separately** — it is not a metric this application itself exports; documented inline in the rule
+   file's comment rather than silently assumed to "just work" once this repository's changes are
+   deployed.
+3. **Thresholds (`for: 5m`, failure counts, error-rate percentages) are conservative starting
+   points for a low-volume MVP, not calibrated against real traffic** — same uncalibrated-default
+   risk class as every other fixed threshold in this codebase (ADR-004/005/006/015).
+
+## ADR-019 — Automatic supplier-import hardening, Stage 7: role-aware AuthorizationService (2026-09-06)
+
+### Контекст
+
+The former `ShopAccessService.hasAccess(user, shopId)` (used across `AdminApiController`,
+`BillingController`, `ImportOperationsController`, `SupplierImportAdminController`, etc.) was
+role-blind: any `shop_members` row, regardless of role, granted the same access as the shop owner.
+Supplier-import automation introduced operations with meaningfully different blast radii — viewing
+an exceptions queue vs approving a `NEEDS_ATTENTION` batch vs flipping `autoApply` to let a source
+write to the catalog unattended — that a role-blind check could not distinguish.
+
+### Решение
+
+- **New `AuthorizationService`, replacing `ShopAccessService` (removed).** `resolveRole(user,
+  shopId)` returns the caller's effective `ShopMember.MemberRole` — the shop owner is always
+  `OWNER` regardless of whether a `shop_members` row exists for them (preserves the pre-existing
+  guarantee that a shop's owner can never lock themselves out), otherwise it's whatever role their
+  `shop_members` row has, or empty if they have none. `hasAccess` (any role at all) is the direct
+  behavioral replacement for the old `hasAccess`; `hasRole(user, shopId, minRole)` is the new
+  capability, "at least as privileged as `minRole`" using `MemberRole`'s declaration order
+  (`OWNER` > `ADMIN` > `STAFF`).
+- **Applied primarily to supplier-import endpoints** (`ImportOperationsController`,
+  `SupplierImportAdminController`): read/review/approve/resume operations require `ADMIN`;
+  `POST .../supplier-sources/{id}/graduate` — the one endpoint that can flip `autoApply` to `true`
+  and let a source write to the catalog completely unattended — requires `OWNER` specifically,
+  strictly higher than every other supplier-source edit, with an inline comment at the check itself
+  explaining why (so a future edit doesn't "simplify" it back down to `ADMIN` without re-reading the
+  reasoning).
+- **Existing non-supplier-import callers of the old `hasAccess`** (`AdminApiController`,
+  `BillingController`, `ReportsController`) migrated to `AuthorizationService.hasAccess` with
+  identical (role-blind, any-access) semantics — this ADR does not tighten those call sites'
+  requirements, only makes the underlying service role-aware for the call sites that opted into
+  `hasRole`. Deliberately conservative: expanding `STAFF`/`ADMIN` distinctions into loyalty/billing
+  endpoints that were never designed with roles in mind is a separate decision this stage didn't
+  make.
+
+### Тесты
+
+`AuthorizationServiceTest` (new) — owner always resolves as `OWNER` even with no `shop_members`
+row; `shop_members` role is used otherwise; no row and not the owner → empty/`hasAccess=false`;
+`hasRole` privilege-ordering matrix (`OWNER` satisfies every `minRole`, `STAFF` satisfies only
+`STAFF`, etc.). `ImportOperationsControllerTest`/`SupplierImportAdminControllerTest` extended —
+`STAFF` role gets 403 on `ADMIN`-gated endpoints; `ADMIN` role gets 403 specifically on `graduate`
+(only `OWNER` may call it); existing `ADMIN`/`OWNER` success paths unchanged.
+
+### Осознанные ограничения
+
+1. **`STAFF` currently has read access to nothing supplier-import-specific that `ADMIN` doesn't** —
+   every supplier-import endpoint's floor is `ADMIN`; `STAFF` was introduced as a role concept (for
+   future lower-privilege use cases) without yet having its own carved-out permission set anywhere
+   in this domain.
+2. **Role assignment/management UI is out of scope for this stage** — `shop_members` rows and their
+   roles are assumed to already be manageable through whatever existing mechanism created them;
+   this stage only changed how roles are *checked*, not how they are *assigned*.
+
+## ADR-020 — Automatic supplier-import hardening, Stage 8: close pre-existing security findings (2026-09-06)
+
+### Контекст
+
+`docs/SUPPLIER_IMPORT_AUDIT.md`'s security addendum (surfaced during the earlier Prompt 09/10
+hardening rounds, tracked as unresolved tech debt in `docs/STATE.md`'s "known failures/blockers")
+listed several findings outside supplier-import's own code but adjacent enough to be inherited risk
+if left open: cross-tenant platform-wide admin endpoints, an unused HMAC validator, unconditional
+payment-confirmation, and unchecked `ShopMember.MemberRole`. Stage 8 closes these.
+
+### Решение
+
+- **`POST /api/admin/webhooks/update-all` and `GET /api/stats`** — previously reachable by any
+  authenticated `AdminUser`, regardless of shop membership, since they are platform-wide rather than
+  shop-scoped. Gated behind a new `SYSTEM_ADMIN_EMAILS` (`app.system-admin-emails`) allowlist —
+  comma-separated emails, **empty by default, meaning nobody can call them** (fail-closed, not
+  fail-open) until an operator explicitly configures the allowlist.
+- **`CloudPaymentsService.validateHmac`** — was implemented but never actually called from the
+  webhook handler, meaning CloudPayments' `Content-HMAC` signature was never actually checked on
+  incoming payment webhooks. Now invoked over the raw request body before trusting any webhook
+  payload; skips validation (logs a warning) only when `CLOUDPAYMENTS_API_SECRET` is unset,
+  consistent with the ADR-009 decision to treat "no secret configured" as an explicit dev/stub mode
+  rather than a silent bypass of a real check.
+- **`confirm-payment` no longer unconditionally activates a subscription.** `CloudPaymentsService.
+  isLiveGatewayConfigured()` (new) is `true` once a real API secret is present; when a live gateway
+  is configured, `confirm-payment` must defer to the HMAC-validated `/cloudpayments/pay` webhook as
+  the sole source of truth for whether a payment actually succeeded, instead of a client-reachable
+  endpoint being able to claim success on its own.
+- **`ShopMember.MemberRole`** — previously stored but never read by any authorization check;
+  resolved by the new `AuthorizationService` (ADR-019), closing the finding by construction rather
+  than as a standalone fix.
+
+### Тесты
+
+`CloudPaymentsServiceTest` (new) — HMAC validation skipped only when no secret configured; correct
+signature passes; tampered body fails; missing header fails when a secret *is* configured;
+`isLiveGatewayConfigured()` reflects secret presence. `BillingControllerTest` — renamed
+`confirmPayment_withoutLiveGateway_stillActivatesSubscription` to
+`confirmPayment_withoutLiveGateway_stillAttemptsActivation` (the test's actual assertion was always
+"attempts activation, may fail if no matching subscription exists" — the old name overclaimed
+unconditional success; behavior itself was correct, only the name was misleading about what's
+guaranteed).
+
+### Осознанные ограничения
+
+1. **`SYSTEM_ADMIN_EMAILS` is an email allowlist, not a role in the `shop_members`/`MemberRole`
+   model** — a separate, simpler mechanism specifically for the handful of platform-wide (not
+   shop-scoped) endpoints; it does not participate in `AuthorizationService`'s per-shop role
+   resolution and should not be conflated with it.
+2. **No audit log of who actually invoked a `SYSTEM_ADMIN_EMAILS`-gated endpoint** beyond whatever
+   the existing request logging already captures — a dedicated admin-action audit trail was not
+   part of this stage's scope.
+
+## ADR-021 — Automatic supplier-import hardening, Stage 9: CI, lint, and dependency hygiene (2026-09-06)
+
+### Контекст
+
+The repository had no CI workflow at all (every `mvn`/`npm` command was run manually by whoever was
+working on it), no Maven Wrapper (relying on each developer's own locally-installed Maven version),
+no ESLint config for the frontend (added dependencies existed in `package.json` but nothing wired
+them up), and `admin-panel/dist/` build output was tracked in git.
+
+### Решение
+
+- **Maven Wrapper** (`mvnw`/`mvnw.cmd`/`.mvn/wrapper/`) — pins the exact Maven version used to
+  build, independent of what's installed on a given machine or CI runner.
+- **`.github/workflows/backend.yml`** — `push`/`pull_request` to `main`, path-filtered to backend
+  files; JDK 21, Maven dependency cache, `./mvnw -B verify`, uploads Surefire reports as artifacts
+  on completion (pass or fail) for post-mortem without needing to reproduce a failure locally.
+- **`.github/workflows/frontend.yml`** — same triggers, path-filtered to frontend files; Node 20,
+  npm cache, `npm ci` → `npm run lint` → `npm run test` → `npm run build` → `npm audit
+  --audit-level=high || true` (audit failures are surfaced in CI logs but don't fail the build —
+  dependency vulnerabilities are a thing to track and schedule fixes for, not something that should
+  block every unrelated PR the moment a new CVE is published upstream).
+- **`admin-panel/eslint.config.js`** (ESLint 9 flat config) — `js.configs.recommended` +
+  `tseslint.configs.recommended` + `react-hooks`/`react-refresh` plugins; `dist/` ignored.
+  Existing frontend code fixed to be lint-clean under this config (empty-interface-as-type-alias,
+  unused imports/vars, `useMemo` dependency correctness) — no rules were loosened to make existing
+  code pass; every fix changed the code, not the config, to satisfy the rule.
+- **`npm audit fix`** — resolved 11 of 15 existing frontend dependency vulnerabilities without
+  breaking changes; the remaining 4 require breaking upstream major-version bumps and are left as a
+  documented, tracked risk rather than force-upgraded blindly mid-hardening-pass.
+- **`.gitignore`: `admin-panel/dist/`** — stopped tracking generated frontend build output;
+  previously-tracked `dist/` files removed from git via `git rm -r --cached` (the working directory
+  copies are untouched, only git's tracking of them is removed).
+
+### Тесты
+
+CI itself is the test: both workflows run the exact same `mvn test`/`npm run lint && npm run test
+&& npm run build` commands a developer would run locally, now enforced on every push/PR rather than
+trusted to have been run manually.
+
+### Осознанные ограничения
+
+1. **No branch protection rule requiring these checks to pass before merge is configured by this
+   ADR** — the workflows run and report status, but whether a failing check actually *blocks* a
+   merge is a GitHub repository-settings decision outside this codebase's control.
+2. **The 4 remaining frontend dependency vulnerabilities requiring breaking changes are not
+   scheduled for a specific future date** — tracked as a known risk, not an open TODO with a
+   deadline.
+3. **No equivalent backend dependency vulnerability scan (e.g. OWASP dependency-check) was wired
+   into CI** — attempted during this stage but blocked by requiring an NVD API key not available in
+   this environment; frontend `npm audit` (which needs no API key) was prioritized instead since it
+   was explicitly requested and achievable without additional credentials.
 

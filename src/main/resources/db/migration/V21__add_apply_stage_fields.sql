@@ -1,9 +1,8 @@
 -- V21: Prompt 06 apply stage - manual visibility override, shop-level default commission,
 -- and per-batch apply audit counters.
 --
--- Same schema-management note as V17-V20: Flyway stays disabled in every profile, so this file is
--- the intended PostgreSQL-compatible target schema, not something actually applied. Dev/test/prod
--- all still rely on Hibernate `ddl-auto: update` against the JPA entities for the real schema.
+-- Schema management: same note as V18 (Stage 6/ADR-013) - baselined away in `prod`, real/executed
+-- everywhere else.
 
 -- Explicit operator override (D-006/docs/ARCHITECTURE.md §14.8): automatic sync never clears this.
 ALTER TABLE products

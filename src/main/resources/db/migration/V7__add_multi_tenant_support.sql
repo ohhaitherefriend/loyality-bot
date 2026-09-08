@@ -4,7 +4,7 @@
 -- ========== 1. Создаём таблицу bot_instances ==========
 
 CREATE TABLE IF NOT EXISTS bot_instances (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     shop_id VARCHAR(36) NOT NULL UNIQUE,
     bot_token VARCHAR(512) NOT NULL,
     bot_username VARCHAR(64) NOT NULL,

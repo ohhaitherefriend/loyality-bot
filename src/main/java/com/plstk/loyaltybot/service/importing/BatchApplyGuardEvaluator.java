@@ -125,6 +125,7 @@ public class BatchApplyGuardEvaluator {
     private void checkPriceDeltas(ImportBatch batch, List<ImportRow> appliableRows, GuardResult.Builder builder) {
         String shopId = batch.getShopId();
         Long supplierId = batch.getSupplierSource().getSupplier().getId();
+        String snapshotScope = batch.getSupplierSource().getSnapshotScope();
         int comparedRows = 0;
         int anomalousRows = 0;
         double warnRatio = properties.getReconciliation().getPriceDeltaWarnRatio();
@@ -138,7 +139,8 @@ public class BatchApplyGuardEvaluator {
                 continue;
             }
             Optional<SupplierOffer> existing = supplierOfferRepository
-                    .findByShopIdAndSupplierIdAndProductId(shopId, supplierId, row.getMatchedProduct().getId());
+                    .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(
+                            shopId, supplierId, snapshotScope, row.getMatchedProduct().getId());
             if (existing.isEmpty()) {
                 continue; // first offer for this product/supplier - no prior price to compare.
             }

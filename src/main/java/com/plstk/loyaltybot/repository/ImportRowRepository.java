@@ -71,6 +71,18 @@ public interface ImportRowRepository extends JpaRepository<ImportRow, Long> {
      * {@code (supplierId, supplierName, totalRows, exceptionRows)} - mapped to a proper DTO in
      * {@code ImportDashboardService} to keep this query portable across H2 and PostgreSQL.
      */
+    /**
+     * Used by the Stage 1 {@code /graduate} safe-activation endpoint's "no unresolved NEEDS_REVIEW
+     * row" blocking gate - a row left in {@code NEEDS_REVIEW} means an operator decision is still
+     * pending for at least one row produced by this source, regardless of which batch it came from.
+     */
+    @Query("SELECT COUNT(r) FROM ImportRow r JOIN r.importBatch b "
+            + "WHERE b.shopId = :shopId AND b.supplierSource.id = :supplierSourceId AND r.status = :status")
+    long countBySupplierSourceIdAndStatus(
+            @Param("shopId") String shopId,
+            @Param("supplierSourceId") Long supplierSourceId,
+            @Param("status") ImportRowStatus status);
+
     @Query("SELECT s.supplier.id, s.supplier.name, COUNT(r), "
             + "SUM(CASE WHEN r.status = com.plstk.loyaltybot.entity.importing.ImportRowStatus.NEEDS_REVIEW "
             + "OR r.status = com.plstk.loyaltybot.entity.importing.ImportRowStatus.INVALID THEN 1 ELSE 0 END) "

@@ -22,8 +22,24 @@
         <java.version>21</java.version>
         <telegrambots.version>6.8.0</telegrambots.version>
         <lombok.version>1.18.44</lombok.version>
+        <aws-sdk.version>2.54.2</aws-sdk.version>
     </properties>
-    
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Stage 10: S3-compatible ImportFileStorage backend (docs/DECISIONS.md ADR-014).
+                 BOM only pins versions across the awssdk:* artifact family; it does not itself pull
+                 in any dependency, so it's safe even for shops that never enable S3 storage. -->
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws-sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
         <!-- Spring Boot Starter -->
         <dependency>
@@ -182,6 +198,51 @@
             <version>2.0.1</version>
             <scope>test</scope>
         </dependency>
+
+        <!--
+        Testcontainers (Stage 6, ADR-013): runs the real Flyway migration chain (V1..latest) against
+        a throwaway PostgreSQL container so schema drift between the migrations and PostgreSQL is
+        caught in CI, not in production. Versions come from Spring Boot's dependency management
+        (spring-boot-dependencies BOM), not pinned here.
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Stage 10, docs/DECISIONS.md ADR-014: optional S3-compatible ImportFileStorage backend
+             (multi-replica production deployments), opt-in via supplier-import.storage.provider=s3.
+             url-connection-client is the smallest HTTP transport available and is enough for the
+             low-volume put/get/delete traffic this storage backend generates. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>netty-nio-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>software.amazon.awssdk</groupId>
+                    <artifactId>apache-client</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>url-connection-client</artifactId>
+        </dependency>
     </dependencies>
     
     <build>
@@ -204,6 +265,24 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                    Stage 6/ADR-013: SchemaBaselineGenerator is a manually-triggered dev tool (run
+                    with `mvn test -Dtest=SchemaBaselineGenerator`), not a real test - it has no
+                    assertions and only exists to regenerate V0__baseline_schema.sql from the current
+                    entity mappings. Excluded here so a plain `mvn test` / CI run doesn't spend ~45s
+                    spinning up an extra Postgres container for it. An explicit `-Dtest=...` on the
+                    command line still runs it: Surefire treats that as an override of this exclude.
+                    -->
+                    <excludes>
+                        <exclude>**/SchemaBaselineGenerator.java</exclude>
+                    </excludes>
+                </configuration>
             </plugin>
         </plugins>
     </build>

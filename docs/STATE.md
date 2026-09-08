@@ -4,11 +4,15 @@
 
 ## Current stage
 
-- Stage: `FINAL_REVIEW_COMPLETE`
-- Active prompt: `10-final-review (completed)`
-- Last verified commit: working tree on top of `0ab53722b8b4413d54fb9c5ba72430f91d0f0bbb`
-  (uncommitted at time of writing — see "Незакоммиченные" note below)
-- Updated at: `2026-09-06 07:50 +03:00`
+- Stage: `AUTOMATIC_SUPPLIER_IMPORT_HARDENING_ROUND_2_COMPLETE`
+- Active work: 10-stage "automatic supplier-import hardening" round (Stage 1-10, see
+  `docs/DECISIONS.md` ADR-011…021) — a second hardening pass over the same pipeline documented
+  below as "Prompt 00-10" (that section is left as historical record, not rewritten)
+- Last verified: `./mvnw -o test` — 325/325 green (49 test classes, incl. `FlywayPostgresSchemaTest`
+  against a real PostgreSQL Testcontainer); `npm run lint` — 0 errors; `npm run build` — success;
+  `npx vitest run` — 21/21 green (6 files)
+- Updated at: `2026-09-07 02:20 +03:00`
+- Uncommitted at time of writing — see "Next action" below for what's pending before a commit.
 
 ## Stage status
 
@@ -25,6 +29,31 @@
 | 08 Manual fallback | completed | `mvn test` (237/237 green, 33 класса); `npm run build`; `npx vitest run` (21/21 green, 6 файлов); ADR-008 |
 | 09 Hardening | completed | `mvn test` (240/240 green, 34 класса); `npm run build`; `npx vitest run` (21/21 green, 6 файлов); ADR-009 |
 | 10 Final review | completed | `mvn test` (240/240 green, 34 класса); `npm run build`; `npx vitest run` (21/21 green, 6 файлов); `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md`; ADR-010 |
+
+## Second hardening round: Stage 1-10 (automatic supplier-import hardening, 2026-09-06)
+
+Отдельный, более поздний review/hardening pass над тем же pipeline — не переиспользует нумерацию
+Prompt 00-10 выше (та секция — исторический, не переписанный журнал первого раунда). Полные детали
+каждого stage — `docs/DECISIONS.md` ADR-011…021; здесь только сводная таблица статуса.
+
+| Stage | Тема | Статус | ADR |
+| --- | --- | --- | --- |
+| 1 | `SupplierSource` PATCH + `graduate` (optimistic locking, validation, autoApply confirm) | completed | (implemented pre-summary; see repo diff) |
+| 2 | `NEEDS_ATTENTION` → `approve` endpoint (dedicated service, re-run guards) | completed | (implemented pre-summary) |
+| 3 | FULL snapshot reconciliation: `snapshotScope` on `SupplierOffer`, widened identity | completed | (implemented pre-summary; `V24`/`V25`) |
+| 4 | Large-catalog matching fix, `brand_aliases` table + CRUD + UI | completed | (implemented pre-summary; `V26`) |
+| 5 | DeepSeek default model + dedicated hardened HTTP client (timeouts/retry/circuit breaker/concurrency) | completed | ADR-011 |
+| 6 | PostgreSQL/Flyway normalization: enable Flyway, baseline cutover, TEXT-vs-jsonb decision, Testcontainers | completed | ADR-012, ADR-013 |
+| 7 | Role-aware `AuthorizationService` (`OWNER`/`ADMIN`/`STAFF`), applied to supplier-import | completed | ADR-019 |
+| 8 | Close pre-existing security findings (`SYSTEM_ADMIN_EMAILS`, CloudPayments HMAC, confirm-payment gating) | completed | ADR-020 |
+| 9 | Maven Wrapper, GitHub Actions CI, ESLint 9, `npm audit fix`, `.gitignore` dist | completed | ADR-021 |
+| 10 | Health indicator, liveness/readiness probes, S3 storage, retention job, correlation IDs, backup scripts, Prometheus alerts | completed | ADR-014, ADR-015, ADR-016, ADR-017, ADR-018 |
+
+Verified at completion: `./mvnw -o test` — 325/325 green, 49 test classes (includes
+`FlywayPostgresSchemaTest` against a real PostgreSQL Testcontainer — requires local Docker);
+`npm run lint` — 0 errors; `npm run build` — success; `npx vitest run` — 21/21 green (6 files).
+See `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §1/§6 for the updated build/test gate and
+resolved/remaining limitations list.
 
 ## Verified facts from repository
 
@@ -438,24 +467,22 @@
 
 ## Known failures / blockers
 
-- Production Flyway всё ещё отключён при `ddl-auto:update` во всех профилях;
-  фактический production DB baseline не подтверждён. `V17` написан как целевая
-  Postgres DDL, но не применяется автоматически — см. ADR-001 в
-  `docs/DECISIONS.md`. Это НЕ решено Prompt 01 и не должно считаться решённым
-  случайным добавлением V17: включение Flyway для production требует
-  отдельного baseline-решения вне scope этого prompt.
-- JSON-поля новых supplier-sync таблиц (`import_files.source_identity`,
-  `import_rows.raw_data/normalized_data/candidate_search_result`,
-  `import_rule_versions.rule_definition`,
-  `match_decisions.candidate_product_ids/conflicts`) реально хранятся как
-  `TEXT`, а не native `jsonb`/`json` — сознательный компромисс, пока Flyway не
-  включён (детали в ADR-001, п.2). Прежде чем на них полагаться в
-  запросах/индексах Prompt 05+, нужно явное решение о JSON-типизации.
-- `pg_trgm` (Postgres extension) не подтверждён на реальной production БД — `V19` пишет целевую
-  DDL, но не применяется автоматически (тот же Flyway-блокер). `supplier-import.matching.
-  pg-trgm-enabled` должен оставаться `false`, пока и Flyway/`V19`, и сама Postgres-версия с
-  доступным `pg_trgm` не подтверждены явно; включение флага без этого приведёт к runtime-ошибке
-  на native-запросе `similarity(...)`.
+**Resolved by the second hardening round (Stage 6, 2026-09-06) — kept below struck through for
+historical continuity, do not reopen without a new measured reason:**
+
+- ~~Production Flyway всё ещё отключён при `ddl-auto:update`~~ — **Resolved (ADR-012/013):** Flyway
+  теперь включён в обоих профилях, `ddl-auto: validate` в prod, baseline cutover на `V23` (историч.
+  факт про уже задеплоенные БД), `V0__baseline_schema.sql` для свежих окружений,
+  `FlywayPostgresSchemaTest` подтверждает весь migration chain против реального PostgreSQL.
+- ~~JSON-поля хранятся как `TEXT`, не `jsonb` — нужно явное решение~~ — **Revisited and confirmed
+  (ADR-012):** decision explicitly re-examined now that Flyway is enabled; TEXT stays, for reasons
+  documented in ADR-012 (no code queries these fields with Postgres JSON operators; a blind
+  `jsonb` cast on unverified historical rows is a real outage risk for zero measured benefit).
+- ~~`pg_trgm` не подтверждён на реальной production БД~~ — **Resolved (ADR-013):**
+  `V27__ensure_pg_trgm_extension_and_indexes.sql` re-asserts the extension for real now that
+  migrations actually execute; `supplier-import.matching.pg-trgm-enabled` remains `false` by
+  default pending a separate decision to actually flip it on (extension availability alone doesn't
+  mean the flag should default to true).
 - `TrigramProductCandidateFetcher` не покрыт интеграционным тестом против реального PostgreSQL
   (в проекте нет Testcontainers) — см. ADR-004, п.1.
 - `BrandAliasResolver` — статическая захардкоженная таблица алиасов, не редактируемая через UI.
@@ -489,9 +516,10 @@
 - `aiAutoApproveMinScore`/`aiMinConfidence` (default `0.80`/`0.55`) не откалиброваны на реальных
   ответах DeepSeek — тесты используют `FakeAiCatalogMatcher`, реальный endpoint ни разу не вызван
   за время внедрения Prompt 05; см. ADR-005, п.3.
-- Нет отдельного circuit breaker для DeepSeek — только retry/backoff внутри одного HTTP-вызова.
-  При продолжительной недоступности DeepSeek каждый batch тратит полный retry-бюджет на каждую
-  строку с кандидатами, прежде чем строка уйдёт в `NEEDS_REVIEW`; см. ADR-005, п.5.
+- ~~Нет отдельного circuit breaker для DeepSeek~~ — **Resolved (Stage 5/ADR-011):
+  `DeepSeekCircuitBreaker` + `DeepSeekHttpClient` now fail fast after
+  `circuitBreakerFailureThreshold` (default 5) consecutive failures instead of every batch/row
+  burning its own full retry budget.
 - `ImportBatchMatchingService` вызывает AI синхронно по одной строке batch, без батчинга нескольких
   строк в один запрос и без параллелизма внутри batch — не измерено на реальном объёме прайс-листа;
   см. ADR-005, п.2.
@@ -525,12 +553,11 @@
 - Manual upload endpoint не ограничен rate-limit/кол-вом одновременных загрузок на shop — при
   нескольких параллельных ручных загрузках одного и того же большого файла нет defensive-лимита,
   кроме обычного `maxFileSizeBytes`; см. ADR-008, п.2.
-- Alert-правила для новых Prometheus-метрик (Prompt 09) задокументированы только как рекомендация
-  в тексте (`docs/ARCHITECTURE.md` §22) — нет Prometheus/Alertmanager конфига в репозитории; см.
-  ADR-009, п.1.
-- Backup-процедура (Postgres + `import-files` volume) задокументирована, но не автоматизирована —
-  нет cron/скрипта в репозитории, конкретная реализация зависит от того, где реально развёрнут
-  production; см. ADR-009, п.2.
+- ~~Alert-правила для новых Prometheus-метрик (Prompt 09) задокументированы только как
+  рекомендация~~ — **Resolved (Stage 10/ADR-018):** `docs/monitoring/prometheus-alerts.yml`, реальный
+  rule-file.
+- ~~Backup-процедура задокументирована, но не автоматизирована~~ — **Resolved (Stage 10/ADR-017):**
+  `scripts/backup/pg-backup.sh`/`pg-restore.sh`.
 - `SCHEDULING_POOL_SIZE=10` — не откалиброван нагрузочным тестом на реальном количестве
   `@Scheduled` jobs/shops; см. ADR-009, п.4.
 - Prompt injection defense в system prompt — текстовая инструкция модели, defense-in-depth поверх
@@ -539,36 +566,42 @@
 - Новый E2E-suite (Prompt 09) не покрывает реальный DeepSeek HTTP/реальный IMAP-сервер (оба fake
   намеренно) и не тестирует настоящую многопоточную гонку — те же накопленные риски, что во всех
   предыдущих ADR; см. ADR-009, п.6-7.
-- Independent re-check нашёл auth/billing findings вне supplier-import scope
-  (cross-tenant `POST /api/admin/webhooks/update-all` и `GET /api/stats`,
-  неиспользуемый `CloudPaymentsService.validateHmac()`, `confirm-payment` без
-  проверки оплаты, `ShopMember.MemberRole` не проверяется нигде). См. addendum
-  в `docs/SUPPLIER_IMPORT_AUDIT.md` (раздел «Дополнительные находки
-  безопасности»). Tech debt, не блокирует Prompt 01/02, но must not be
-  inherited silently если import backoffice переиспользует
-  `AdminApiController`/`ShopAccessService`.
+- ~~Independent re-check нашёл auth/billing findings вне supplier-import scope (cross-tenant
+  `POST /api/admin/webhooks/update-all` и `GET /api/stats`, неиспользуемый
+  `CloudPaymentsService.validateHmac()`, `confirm-payment` без проверки оплаты,
+  `ShopMember.MemberRole` не проверяется нигде)~~ — **Resolved (Stage 7/8, ADR-019/020):**
+  role-aware `AuthorizationService` reads `MemberRole`; platform-wide endpoints gated by
+  `SYSTEM_ADMIN_EMAILS`; HMAC actually invoked; `confirm-payment` gated by
+  `isLiveGatewayConfigured()`.
 
 ## Next action
 
-Prompt 10 (финальная ревизия) завершён и проверен (`mvn test` 240/240; `mvn -o package -DskipTests`;
-`npm run build`; `npx vitest run` 21/21; `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md`; ADR-010). Весь
-заявленный scope Prompt 01-10 из `prompts/MASTER_PROMPT.md` закрыт — supplier-import automation
-pipeline готов к операционному включению для реального поставщика при условии прохождения
-`docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` (build/test gate, automation rate measurement,
-shadow-mode acceptance, FULL snapshot чеклист) для этого конкретного поставщика/окружения.
+Both hardening rounds are complete and verified on the current working tree (uncommitted — see
+below): Prompt 00-10 (первый раунд, `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §§1-5, ADR-001…010)
+and the second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021, table above).
+Current full-suite verification: `./mvnw -o test` — 325/325 green (49 classes); `./mvnw -o package
+-DskipTests` — success; `npm run lint` — 0 errors; `npm run build` — success; `npx vitest run` —
+21/21 green. `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` updated (§1 build/test gate, §6
+resolved/remaining limitations) to reflect this second round.
 
 Прежде чем включать `autoApply=true` для реального поставщика, перепроверить накопленные
-ограничения (полный список — `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §6, здесь только
-сводка): OAuth2 mailbox auth не реализован (только IMAP + app password); `pg_trgm` fetcher не
-подтверждён на реальном Postgres; fuzzy/AI/guard thresholds — статичные config defaults, не
-откалиброваны на реальном ассортименте/волатильности конкретного поставщика (см. release checklist
-§3-5); нет circuit breaker для DeepSeek; concurrency (несколько реплик) не тестировалась настоящей
-многопоточной гонкой ни в одном prompt; `ddl-auto: update`/Flyway — unchanged decision, production
-schema baseline не подтверждён; alert-правила/backup — задокументированы, не автоматизированы;
-prompt injection defense в system prompt — defense-in-depth, не единственная защита (structural
-guarantees в `CatalogMatchResponseValidator`/`LayoutRuleValidator` остаются первичной линией).
+ограничения — актуальный полный список теперь `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §6
+(resolved vs remaining), здесь только то, что **остаётся открытым** после обоих раундов: OAuth2
+mailbox auth не реализован (только IMAP + app password); fuzzy/AI/guard thresholds — статичные
+config defaults, не откалиброваны на реальном ассортименте/волатильности конкретного поставщика
+(см. release checklist §3-5); DeepSeek circuit breaker/concurrency limiter (ADR-011) —
+per-JVM-instance state, не shared между репликами; concurrency (несколько реплик) не тестировалась
+настоящей многопоточной гонкой ни в одном prompt/stage; S3 storage (ADR-014)/retention (ADR-015) —
+не покрыты real-provider integration тестами; correlation ID (ADR-016) не покрывает `@Scheduled`
+jobs; alert-правила (ADR-018) требуют отдельно развёрнутого Alertmanager/blackbox_exporter; prompt
+injection defense в system prompt — defense-in-depth, не единственная защита (structural guarantees
+в `CatalogMatchResponseValidator`/`LayoutRuleValidator` остаются первичной линией).
 
-Ничего дальше в `prompts/` не запланировано этим master-планом; следующий шаг за пределами scope
-этого review — операционное включение для первого реального поставщика по чеклисту выше, не новый
-prompt в этом репозитории.
+Следующий шаг за пределами scope обоих review-раундов — операционное включение для первого
+реального поставщика по `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md`, не новый prompt/stage в этом
+репозитории, если не появится новый явный запрос.
+
+**Не закоммичено на момент написания** — рабочее дерево содержит все изменения Stage 1-10 (backend
++ frontend + миграции + docs); коммит выполняется только по явному запросу пользователя (см. workspace
+rule "Do not push changes or commit without explicit commands").
 

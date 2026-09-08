@@ -10,7 +10,10 @@ spring:
   
   jpa:
     hibernate:
-      ddl-auto: update
+      # Stage 6/ADR-013: Flyway (not Hibernate) now owns the production schema. `validate` fails
+      # startup loudly if an entity mapping and the migrated schema ever disagree, instead of
+      # `update` silently patching production tables on every deploy.
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
@@ -18,7 +21,16 @@ spring:
         format_sql: false
   
   flyway:
-    enabled: false  # Отключаем - миграции для MySQL, используем Hibernate ddl-auto
+    enabled: true
+    # `prod` was schema-managed exclusively by Hibernate `ddl-auto: update` through V23 (see each
+    # migration file's comment for exactly which ones this covers). baseline-on-migrate marks that
+    # pre-existing schema as "already at V23" on first run instead of trying to CREATE TABLE
+    # everything from scratch, then Flyway executes V24+ for real - those are the genuinely new
+    # migrations from this release. This value is a one-time historical fact about this specific
+    # cutover, not a knob to casually change; see docs/DECISIONS.md ADR-013.
+    baseline-on-migrate: true
+    baseline-version: ${FLYWAY_BASELINE_VERSION:23}
+    baseline-description: "Pre-Flyway schema (Hibernate ddl-auto managed)"
 
   # See application.yml for rationale: bounds the shared @Scheduled thread pool so supplier-import
   # jobs (mailbox poll, parse, normalize, match, validate, apply) and loyalty cron jobs don't
@@ -72,6 +84,15 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Stage 10: /actuator/health/liveness + /actuator/health/readiness for the container
+      # orchestrator's probes (see docs/ARCHITECTURE.md §22).
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
 
 billing:
   trial-days: ${BILLING_TRIAL_DAYS:7}
@@ -96,3 +117,7 @@ logging:
     com.plstk: INFO
     org.telegram: WARN
     org.hibernate: WARN
+  # Stage 10: same [correlationId] tag as application.yml, no ANSI color codes (prod logs go to a
+  # file/log aggregator, not an interactive terminal).
+  pattern:
+    console: "%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %5p ${PID:- } --- [%15.15t] [%X{correlationId:-OFF}] %-40.40logger{39} : %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}"

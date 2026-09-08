@@ -33,6 +33,17 @@ public class SupplierSource {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /**
+     * Optimistic locking (Stage 1 of the production-hardening pass): a concurrent PATCH/graduate
+     * call that read a stale version fails fast with a 409 instead of silently overwriting another
+     * operator's change (e.g. one operator disabling {@code enabled} while another graduates
+     * {@code autoApply} at the same time).
+     */
+    @Version
+    @Column(nullable = false)
+    @Builder.Default
+    private Long version = 0L;
+
     @Column(nullable = false, length = 36)
     private String shopId;
 

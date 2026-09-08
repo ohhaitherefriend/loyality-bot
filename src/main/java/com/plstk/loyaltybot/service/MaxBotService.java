@@ -458,7 +458,7 @@ public class MaxBotService {
 
         if (admin.getRole() != User.UserRole.ADMIN) return;
 
-        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim());
+        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim(), shopId);
 
         if (purchaseCodeOpt.isEmpty()) {
             sendMessage(ctx, chatId, "❌ Код не найден.", getUserKeyboard(admin, shopId));

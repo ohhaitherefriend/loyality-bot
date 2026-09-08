@@ -1,0 +1,129 @@
+# Stage 10 (docs/DECISIONS.md ADR-016): Prometheus alerting rules for the supplier-import
+# pipeline and general app health. Point your Prometheus `rule_files` at this file (or copy it
+# into your Prometheus config directory) and scrape `/actuator/prometheus` on the app.
+#
+# These thresholds are deliberately conservative starting points for a single-shop-per-tenant,
+# low-volume MVP; tune `for:` durations and thresholds once you have real traffic baselines.
+groups:
+  - name: loyalty-bot-supplier-import
+    rules:
+      - alert: SupplierImportBatchFailureSpike
+        expr: increase(supplier_import_batch_apply_total{result="failed"}[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Supplier import batch(es) failed to apply in the last hour"
+          description: >-
+            {{ $value }} supplier import batch(es) failed to apply in the last hour on
+            {{ $labels.instance }}. Check /api/shops/{shopId}/operations/batches and application
+            logs (filter by correlation id) for the root cause.
+
+      - alert: SupplierImportNoSuccessfulBatch24h
+        expr: increase(supplier_import_batch_apply_total{result="applied"}[24h]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No supplier import batch has applied successfully in 24h"
+          description: >-
+            No batch reached APPLIED status in the last 24 hours on {{ $labels.instance }}. This
+            can mean the mailbox poller stopped finding new price files, or every batch is stuck
+            in NEEDS_ATTENTION/failed. Check the operations queue.
+
+      - alert: SupplierImportDeepSeekCircuitBreakerOpen
+        expr: supplier_import_deepseek_circuit_breaker_state == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DeepSeek circuit breaker is OPEN"
+          description: >-
+            The DeepSeek circuit breaker has been open for 5+ minutes on {{ $labels.instance }}.
+            AI-assisted matching/layout-detection is currently short-circuited; imports will fall
+            back to deterministic matching only. Check DeepSeek API status and credentials.
+
+      - alert: SupplierImportRetentionDeletionFailures
+        expr: increase(supplier_import_retention_deletion_total{result="failed"}[1h]) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Import file retention job failed to delete some blobs"
+          description: >-
+            The retention sweep failed to delete {{ $value }} blob(s) in the last hour on
+            {{ $labels.instance }}. Metadata is preserved either way; this only affects storage
+            cost, not correctness. Check storage provider connectivity/permissions.
+
+      - alert: SupplierImportMailboxPollFailures
+        expr: increase(supplier_import_mailbox_poll_total{result="failure"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Repeated mailbox poll failures"
+          description: >-
+            More than 3 mailbox poll failures in the last hour on {{ $labels.instance }}. Check
+            IMAP credentials/connectivity for the affected mailbox(es).
+
+  - name: loyalty-bot-app-health
+    rules:
+      # Requires a Prometheus scrape job (conventionally named "loyalty-bot") pointed at
+      # GET /actuator/prometheus on each instance.
+      - alert: AppDown
+        expr: up{job="loyalty-bot"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "loyalty-bot instance is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for 2+ minutes."
+
+      # /actuator/health/readiness and /actuator/health/liveness (enabled in application.yml,
+      # Stage 10) are plain HTTP probes, not Micrometer metrics - Spring Boot does not expose
+      # AvailabilityState as a gauge out of the box. To alert on them from Prometheus, run a
+      # blackbox_exporter (https://github.com/prometheus/blackbox_exporter) `http_2xx` probe
+      # against each instance's readiness URL and scrape *that*; the expr below assumes such a
+      # probe job named "loyalty-bot-readiness". If you don't want to run blackbox_exporter, at
+      # minimum wire your container orchestrator's own readiness probe (e.g. a Kubernetes
+      # readinessProbe) to that same URL so unready pods are pulled out of rotation without needing
+      # Prometheus at all.
+      - alert: AppNotReady
+        expr: probe_success{job="loyalty-bot-readiness"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "loyalty-bot instance failing readiness probe"
+          description: >-
+            {{ $labels.instance }} has been failing the /actuator/health/readiness probe for
+            5+ minutes. Likely a downstream dependency (database) is unavailable.
+
+      - alert: AppHighErrorRate
+        expr: |
+          sum(rate(http_server_requests_seconds_count{job="loyalty-bot", status=~"5.."}[5m]))
+            /
+          sum(rate(http_server_requests_seconds_count{job="loyalty-bot"}[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "loyalty-bot 5xx error rate above 5%"
+          description: >-
+            More than 5% of HTTP responses on {{ $labels.instance }} have been 5xx over the
+            last 5 minutes.
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: |
+          hikaricp_connections_active{job="loyalty-bot"}
+            >=
+          hikaricp_connections_max{job="loyalty-bot"}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection pool near/at capacity"
+          description: >-
+            HikariCP active connections have equalled the configured max on
+            {{ $labels.instance }} for 5+ minutes. Requests may be queuing or timing out.

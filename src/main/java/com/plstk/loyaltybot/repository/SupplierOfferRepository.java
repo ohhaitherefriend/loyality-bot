@@ -12,7 +12,9 @@ import java.util.Optional;
 @Repository
 public interface SupplierOfferRepository extends JpaRepository<SupplierOffer, Long> {
 
-    Optional<SupplierOffer> findByShopIdAndSupplierIdAndProductId(String shopId, Long supplierId, Long productId);
+    /** Scope-aware offer identity lookup (Stage 3) - see {@link SupplierOffer} unique constraint. */
+    Optional<SupplierOffer> findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(
+            String shopId, Long supplierId, String snapshotScope, Long productId);
 
     List<SupplierOffer> findByShopIdAndProductIdAndActiveTrue(String shopId, Long productId);
 
@@ -24,9 +26,14 @@ public interface SupplierOfferRepository extends JpaRepository<SupplierOffer, Lo
      * {@code supplierSourceId}: several {@code SupplierSource}s of the same supplier can share one
      * {@code snapshotScope} (e.g. re-sent duplicate-category files), and a partial-scope file from
      * one source must never deactivate offers that belong to a different source/scope.
+     *
+     * <p>Stage 3: filters on the offer's own persisted {@code snapshotScope} column, not a live join
+     * to {@code supplierSource.snapshotScope} - the latter tracks whichever source last touched the
+     * row and would stop matching (or wrongly start matching) if that source's scope is edited later
+     * or if a same-scope offer is later updated by a different {@code SupplierSource}.
      */
     @Query("SELECT o FROM SupplierOffer o WHERE o.shopId = :shopId AND o.supplier.id = :supplierId "
-            + "AND o.supplierSource.snapshotScope = :snapshotScope AND o.active = true "
+            + "AND o.snapshotScope = :snapshotScope AND o.active = true "
             + "AND (o.lastSeenBatch IS NULL OR o.lastSeenBatch.id <> :currentBatchId)")
     List<SupplierOffer> findStaleActiveOffersInScope(
             @Param("shopId") String shopId,

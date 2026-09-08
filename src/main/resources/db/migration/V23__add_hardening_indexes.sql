@@ -1,10 +1,9 @@
 -- V23: Prompt 09 production hardening - composite indexes for exception-queue/dashboard queries
 -- that filter by (shop_id, status) without a supplier predicate.
 --
--- Same schema-management note as V17-V22: Flyway stays disabled in every profile, so this file is
--- the intended PostgreSQL-compatible target schema, not something actually applied. Dev/test/prod
--- all still rely on Hibernate `ddl-auto: update` against the JPA entity @Index annotations
--- (ImportRow, ImportBatch) for the real schema.
+-- Schema management: same note as V18 (Stage 6/ADR-013) - baselined away in `prod`, real/executed
+-- everywhere else. These two indexes are also declared as JPA @Index annotations on ImportRow /
+-- ImportBatch, so ddl-auto has already created them in `prod` prior to this release regardless.
 
 -- Exception queue (ImportRowRepository.findExceptionRows) and dashboard counts
 -- (countByShopIdAndStatusIn) both filter by shop_id + status across a shop's entire row history.

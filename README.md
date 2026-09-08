@@ -61,3 +61,13 @@ email -> Excel attachment -> layout detection -> parsing -> normalization
 
 Положите в закрытую test-fixtures директорию репозитория обезличенные примеры реальных Excel-файлов и, если возможно, исходные письма без персональных данных. Секреты почты и API-ключи в комплект не входят и не должны коммититься.
 
+## Второй hardening-раунд (production readiness)
+
+Промпты 00-10 выше покрывают первый, функциональный раунд (email → каталог → apply). После него
+прошёл отдельный production-readiness раунд ("Stage 1-10 automatic supplier-import hardening":
+API/UI для `SupplierSource`, approve-flow, FULL snapshot fix, brand aliases, DeepSeek hardening,
+Postgres/Flyway, role-aware авторизация, security-находки, CI/lint, production ops) —
+задокументирован в `docs/DECISIONS.md` (ADR-011…021) и суммирован в `docs/STATE.md` (раздел
+«Second hardening round»). Перед первым реальным включением для поставщика — пройти
+`docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` целиком, не только промпты 00-10.
+

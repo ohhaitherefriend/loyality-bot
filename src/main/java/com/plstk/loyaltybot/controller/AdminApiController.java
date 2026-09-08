@@ -8,6 +8,7 @@ import com.plstk.loyaltybot.entity.ShopSettings;
 import com.plstk.loyaltybot.entity.ShopMember;
 import com.plstk.loyaltybot.repository.ShopMemberRepository;
 import com.plstk.loyaltybot.repository.ShopRepository;
+import com.plstk.loyaltybot.service.AuthorizationService;
 import com.plstk.loyaltybot.service.BotInstanceService;
 import com.plstk.loyaltybot.service.ShopSettingsService;
 import com.plstk.loyaltybot.service.SubscriptionService;
@@ -17,12 +18,16 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * REST API для Web-админки.
@@ -40,6 +45,16 @@ public class AdminApiController {
     private final ShopMemberRepository shopMemberRepository;
     private final ShopRepository shopRepository;
     private final SubscriptionService subscriptionService;
+    private final AuthorizationService authorizationService;
+
+    /**
+     * Stage 8 security hardening: {@code /admin/webhooks/update-all} and {@code /stats} are
+     * platform-wide (not shop-scoped, so {@link AuthorizationService} does not apply to them) and
+     * were previously reachable by any authenticated {@link AdminUser}. Empty by default, which
+     * fails closed — nobody can call them until an operator explicitly lists their own email here.
+     */
+    @Value("${app.system-admin-emails:}")
+    private String systemAdminEmailsRaw;
     
     // ========== Bot Connection ==========
     
@@ -243,6 +258,9 @@ public class AdminApiController {
         if (user == null) {
             return ResponseEntity.status(401).build();
         }
+        if (!isSystemAdmin(user)) {
+            return ResponseEntity.status(403).build();
+        }
         log.info("Updating webhooks for all bots to baseUrl={}", request.baseUrl());
         
         List<BotInstance> bots = botInstanceService.findAllActive();
@@ -405,6 +423,9 @@ public class AdminApiController {
         if (user == null) {
             return ResponseEntity.status(401).build();
         }
+        if (!isSystemAdmin(user)) {
+            return ResponseEntity.status(403).build();
+        }
         long activeBots = botInstanceService.countActiveBots();
         // TODO: добавить больше статистики
         
@@ -414,12 +435,23 @@ public class AdminApiController {
     // ========== Helper Methods ==========
     
     private boolean hasAccessToShop(AdminUser user, String shopId) {
-        if (shopRepository.findByShopId(shopId)
-                .map(s -> s.getOwnerId().equals(user.getId()))
-                .orElse(false)) {
-            return true;
+        return authorizationService.hasAccess(user, shopId);
+    }
+
+    /**
+     * True if {@code user} is one of the operator-configured system admins allowed to call
+     * platform-wide (non-shop-scoped) endpoints. See {@link #systemAdminEmailsRaw}.
+     */
+    private boolean isSystemAdmin(AdminUser user) {
+        if (user == null || user.getEmail() == null) {
+            return false;
         }
-        return shopMemberRepository.existsByUserIdAndShopId(user.getId(), shopId);
+        Set<String> allowed = Arrays.stream(systemAdminEmailsRaw.split(","))
+                .map(String::trim)
+                .filter(email -> !email.isBlank())
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
+        return allowed.contains(user.getEmail().toLowerCase());
     }
     
     private boolean hasAccessToBot(AdminUser user, Long botId) {

@@ -46,6 +46,10 @@ services:
       # makes every already-stored mailbox app-password undecryptable - see backup guidance in
       # docs/ARCHITECTURE.md §22.
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      # Stage 8 security hardening: comma-separated AdminUser emails allowed to call platform-wide
+      # endpoints (POST /api/admin/webhooks/update-all, GET /api/stats). Optional - empty/unset
+      # means nobody can call them (fail closed), which is safe for shops that never use them.
+      SYSTEM_ADMIN_EMAILS: ${SYSTEM_ADMIN_EMAILS:-}
 
       # Supplier import automation (Prompts 01-09, docs/ARCHITECTURE.md). All optional: the app
       # starts fine and the mailbox/AI stages simply no-op if these are unset (docs/ARCHITECTURE.md
@@ -53,9 +57,34 @@ services:
       # the bind-mounted volume below, not an ephemeral container path, or every ingested file is
       # lost on container recreate.
       SUPPLIER_IMPORT_STORAGE_PATH: ${SUPPLIER_IMPORT_STORAGE_PATH:-/data/import-files}
+      # Stage 10 (docs/DECISIONS.md ADR-014): local (default, this single-container compose setup)
+      # or s3 - REQUIRED to be s3 if you ever run more than one `app` replica, since the
+      # import_files volume below is local to whichever host runs this specific container.
+      SUPPLIER_IMPORT_STORAGE_PROVIDER: ${SUPPLIER_IMPORT_STORAGE_PROVIDER:-local}
+      SUPPLIER_IMPORT_S3_BUCKET: ${SUPPLIER_IMPORT_S3_BUCKET:-}
+      SUPPLIER_IMPORT_S3_REGION: ${SUPPLIER_IMPORT_S3_REGION:-eu-central-1}
+      SUPPLIER_IMPORT_S3_ENDPOINT: ${SUPPLIER_IMPORT_S3_ENDPOINT:-}
+      SUPPLIER_IMPORT_S3_ACCESS_KEY_ID: ${SUPPLIER_IMPORT_S3_ACCESS_KEY_ID:-}
+      SUPPLIER_IMPORT_S3_SECRET_ACCESS_KEY: ${SUPPLIER_IMPORT_S3_SECRET_ACCESS_KEY:-}
+      SUPPLIER_IMPORT_S3_PATH_STYLE_ACCESS: ${SUPPLIER_IMPORT_S3_PATH_STYLE_ACCESS:-false}
+      SUPPLIER_IMPORT_S3_KEY_PREFIX: ${SUPPLIER_IMPORT_S3_KEY_PREFIX:-}
+      # Stage 10 (docs/DECISIONS.md ADR-015): opt-in deletion of terminal-batch source files past
+      # this retention window. Disabled by default.
+      SUPPLIER_IMPORT_RETENTION_ENABLED: ${SUPPLIER_IMPORT_RETENTION_ENABLED:-false}
+      SUPPLIER_IMPORT_RETENTION_FILE_DAYS: ${SUPPLIER_IMPORT_RETENTION_FILE_DAYS:-180}
       SUPPLIER_IMPORT_DEEPSEEK_API_KEY: ${SUPPLIER_IMPORT_DEEPSEEK_API_KEY:-}
-      SUPPLIER_IMPORT_DEEPSEEK_MODEL: ${SUPPLIER_IMPORT_DEEPSEEK_MODEL:-deepseek-chat}
+      SUPPLIER_IMPORT_DEEPSEEK_MODEL: ${SUPPLIER_IMPORT_DEEPSEEK_MODEL:-deepseek-v4-flash}
       SUPPLIER_IMPORT_DEEPSEEK_BASE_URL: ${SUPPLIER_IMPORT_DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      # Dedicated DeepSeek HTTP client tuning (DeepSeekHttpClient, Stage 5) - all optional, safe
+      # defaults applied by SupplierImportProperties if unset.
+      SUPPLIER_IMPORT_DEEPSEEK_CONNECT_TIMEOUT_MS: ${SUPPLIER_IMPORT_DEEPSEEK_CONNECT_TIMEOUT_MS:-5000}
+      SUPPLIER_IMPORT_DEEPSEEK_TIMEOUT_MS: ${SUPPLIER_IMPORT_DEEPSEEK_TIMEOUT_MS:-20000}
+      SUPPLIER_IMPORT_DEEPSEEK_MAX_RETRIES: ${SUPPLIER_IMPORT_DEEPSEEK_MAX_RETRIES:-2}
+      SUPPLIER_IMPORT_DEEPSEEK_RETRY_BACKOFF_MS: ${SUPPLIER_IMPORT_DEEPSEEK_RETRY_BACKOFF_MS:-500}
+      SUPPLIER_IMPORT_DEEPSEEK_MAX_CONCURRENT_REQUESTS: ${SUPPLIER_IMPORT_DEEPSEEK_MAX_CONCURRENT_REQUESTS:-4}
+      SUPPLIER_IMPORT_DEEPSEEK_CONCURRENCY_ACQUIRE_TIMEOUT_MS: ${SUPPLIER_IMPORT_DEEPSEEK_CONCURRENCY_ACQUIRE_TIMEOUT_MS:-3000}
+      SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_OPEN_DURATION_MS: ${SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_OPEN_DURATION_MS:-30000}
 
       # Bounds the shared @Scheduled thread pool (mailbox poll/parse/normalize/match/validate/apply
       # jobs + existing loyalty cron jobs) - see docs/ARCHITECTURE.md §22.

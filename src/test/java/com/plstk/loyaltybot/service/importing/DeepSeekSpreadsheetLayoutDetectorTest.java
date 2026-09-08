@@ -52,8 +52,10 @@ class DeepSeekSpreadsheetLayoutDetectorTest {
         properties.getAi().getDeepseek().setApiKey("test-key");
         properties.getAi().getDeepseek().setMaxRetries(2);
         properties.getAi().getDeepseek().setRetryBackoffMs(1); // keep tests fast
-        detector = new DeepSeekSpreadsheetLayoutDetector(
-                properties, restTemplate, new ObjectMapper(), new SupplierImportMetrics(new SimpleMeterRegistry()));
+        SupplierImportMetrics metrics = new SupplierImportMetrics(new SimpleMeterRegistry());
+        DeepSeekHttpClient httpClient = new DeepSeekHttpClient(
+                properties, restTemplate, new ObjectMapper(), metrics, new DeepSeekCircuitBreaker());
+        detector = new DeepSeekSpreadsheetLayoutDetector(properties, httpClient, new ObjectMapper(), metrics);
     }
 
     @Test

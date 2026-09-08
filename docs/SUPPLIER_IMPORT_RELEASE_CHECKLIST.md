@@ -1,21 +1,26 @@
-# Supplier Import Automation — Release Checklist (Prompt 10)
+# Supplier Import Automation — Release Checklist (Prompt 10, обновлено Stage 1-10 hardening)
 
 Итог финальной ревизии (`prompts/10-final-review.md`) поверх end-to-end supplier-import pipeline
-(Prompt 01-09). Это операционный чеклист для человека, включающего автоматизацию для реального
-поставщика/окружения — не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений
-(см. `docs/DECISIONS.md` → ADR-010 для деталей этого prompt).
+(Prompt 01-09), **обновлён** после второго hardening-раунда ("Stage 1-10 automatic supplier-import
+hardening": `SupplierSource` PATCH/graduate, `NEEDS_ATTENTION` approve, FULL snapshot scope fix,
+large-catalog matching + brand aliases, DeepSeek hardening, Postgres/Flyway, role-aware auth,
+security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-011…021). Это
+операционный чеклист для человека, включающего автоматизацию для реального поставщика/окружения —
+не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений (см. `docs/DECISIONS.md`).
 
 ## 1. Build/test gate (обязательно перед релизом)
 
 Все команды выполняются из корня репозитория.
 
-| Проверка | Команда | Ожидаемый результат (на момент этого прогона) |
+| Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-06) |
 | --- | --- | --- |
-| Backend компиляция | `mvn -q compile` | без ошибок |
-| Backend unit+`@DataJpaTest` suite | `mvn test` | `Tests run: 240, Failures: 0, Errors: 0` (35 классов) |
-| Backend package | `mvn -o package -DskipTests` | success |
+| Backend компиляция | `./mvnw -q -o compile` | без ошибок |
+| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 325, Failures: 0, Errors: 0` (49 классов, включая `FlywayPostgresSchemaTest` против реального PostgreSQL — требует локальный Docker) |
+| Backend package | `./mvnw -o package -DskipTests` | success |
+| Frontend lint | `npm run lint` (в `admin-panel/`) | `0 errors` (несколько pre-existing warnings, не блокирующие) |
 | Frontend build | `npm run build` (в `admin-panel/`) | success (bundle warning про chunk size — известный, не блокирующий) |
 | Frontend tests | `npx vitest run` (в `admin-panel/`) | `Test Files 6 passed (6)`, `Tests 21 passed (21)` |
+| CI (автоматически на push/PR) | `.github/workflows/backend.yml` + `.github/workflows/frontend.yml` | те же команды выше, теперь на каждый push/PR (Stage 9/ADR-021) |
 
 Нет отдельного E2E-suite вне `mvn test` — три сквозных сценария (`SupplierImportEndToEndTest`,
 Prompt 09/ADR-009) запускаются в составе обычного backend suite, не отдельной командой.
@@ -90,10 +95,10 @@ Prompt 09/ADR-009) запускаются в составе обычного bac
 - `CatalogAvailabilityService.recompute` не сбрасывал `Product.salePrice` при потере последнего
   active offer — товар становился невидимым, но хранил устаревшую цену; теперь `salePrice` тоже
   очищается.
-- `supplier-import.ai.deepseek.timeout-ms` — задокументирован как фактически не подключённый (весь
-  DeepSeek HTTP трафик идёт через один общий `RestTemplate` с фиксированным таймаутом,
-  `RestTemplateConfig`); не переподключался в этом prompt, чтобы не трогать общий HTTP-клиент,
-  используемый Telegram/оплатами/поиском изображений.
+- ~~`supplier-import.ai.deepseek.timeout-ms` — не подключён к реальному таймауту~~ — **Resolved
+  (Stage 5/ADR-011):** dedicated `DeepSeekClientConfig`/`deepSeekRestTemplate` bean, separate from
+  the shared Telegram/payments/image-search `RestTemplate`, with its own configurable connect/read
+  timeouts.
 - `reference/deepseek-layout-response.schema.json` описывал устаревшую, отличающуюся от реального
   runtime-контракта форму ответа — синхронизирован с фактической `src/main/resources/supplier-import/
   layout-rule.schema.json`.
@@ -198,22 +203,50 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
    §14.8) — один выборочный ручной прогон перед тем, как доверять этому по умолчанию для конкретного
    магазина.
 
-## 6. Известные ограничения, унаследованные из Prompt 01-09 (не закрыты этим prompt)
+## 6. Известные ограничения (обновлено после Stage 1-10 hardening)
 
-Не переоткрывать/не пере-исследовать — уже задокументированы, ссылки для контекста:
+Не переоткрывать/не пере-исследовать — уже задокументированы, ссылки для контекста.
+
+**Закрыто вторым hardening-раундом** (не открывать заново без нового измеренного повода):
+
+- ~~Нет circuit breaker для DeepSeek~~ — **Resolved (Stage 5/ADR-011)**, per-JVM-instance
+  `DeepSeekCircuitBreaker` + concurrency limiter; state still not shared across replicas (см. ниже).
+- ~~`ddl-auto: update`/Flyway remains unchanged~~ — **Resolved (Stage 6/ADR-012/013):** Flyway
+  включён в обоих профилях, `ddl-auto: validate` в prod, baseline cutover на `V23`,
+  `FlywayPostgresSchemaTest` против реального Postgres.
+- ~~Alert-правила только как рекомендация в тексте~~ — **Resolved (Stage 10/ADR-018):**
+  `docs/monitoring/prometheus-alerts.yml`, реальный Prometheus rule-file.
+- ~~Backup процедура не автоматизирована~~ — **Resolved (Stage 10/ADR-017):**
+  `scripts/backup/pg-backup.sh`/`pg-restore.sh`.
+- ~~Нет CI~~ — **Resolved (Stage 9/ADR-021):** `.github/workflows/backend.yml`/`frontend.yml`.
+- ~~`ShopAccessService` role-blind~~ — **Resolved (Stage 7/ADR-019):** role-aware
+  `AuthorizationService` (`OWNER`/`ADMIN`/`STAFF`), `graduate` (autoApply toggle) requires `OWNER`.
+- ~~Multi-replica local file storage invisible across replicas~~ — **Resolved (Stage 10/ADR-014):**
+  opt-in S3-compatible `ImportFileStorage` (`SUPPLIER_IMPORT_STORAGE_PROVIDER=s3`).
+- ~~Cross-tenant platform-wide admin endpoints / unused HMAC validator / unconditional
+  confirm-payment~~ — **Resolved (Stage 8/ADR-020):** `SYSTEM_ADMIN_EMAILS` allowlist, HMAC
+  actually enforced, `confirm-payment` gated by `isLiveGatewayConfigured()`.
+
+**Остаются открытыми** (не закрыты вторым hardening-раундом):
 
 - OAuth2 mailbox auth не реализован (только IMAP + app password) — `docs/STATE.md`, ADR-002.
-- `pg_trgm` candidate fetcher не подтверждён на реальном Postgres — `docs/STATE.md`, ADR-004 п.1.
+- `pg_trgm` candidate fetcher — extension теперь гарантированно установлен через `V27` (Stage 6), но
+  сам fetcher по-прежнему не покрыт integration-тестом против реального объёма продакшн-каталога.
 - Fuzzy/AI/guard thresholds — статические config defaults, не откалиброваны на реальном
   ассортименте/волатильности — `docs/STATE.md`, ADR-004/005/006 (см. также §3-5 выше).
-- Нет circuit breaker для DeepSeek (только retry/backoff одного вызова) — ADR-005 п.5.
 - Concurrency (несколько реплик/потоков) не проверена настоящей многопоточной гонкой ни в одном
-  prompt, включая этот — только conditional-`UPDATE`/claim-lease на уровне кода; см. ADR-009 п.7.
-- `ddl-auto: update`/Flyway остаётся unchanged decision — production schema baseline не
-  подтверждён; см. ADR-001 п.1 (unchanged всеми последующими ADR).
-- Alert-правила для `SupplierImportMetrics` задокументированы как рекомендация
-  (`docs/ARCHITECTURE.md` §22), не как Prometheus/Alertmanager конфиг в репозитории.
-- Backup процедура задокументирована, не автоматизирована (нет cron/скрипта в репозитории).
+  prompt — только conditional-`UPDATE`/claim-lease на уровне кода; см. ADR-009 п.7.
+- DeepSeek circuit breaker/concurrency limiter — state per-JVM-instance, не shared между репликами
+  (ADR-011 п.1) — не изменилось Stage 10.
+- Retention (`ImportRetentionJob`, ADR-015) — `fileRetentionDays=180` не откалиброван на реальных
+  compliance-требованиях; disabled by default, оператор должен явно решить.
+- S3 storage (ADR-014) — нет инструмента миграции уже сохранённых local-файлов при переключении
+  provider; нет integration-теста против реального S3/MinIO.
+- Correlation ID (ADR-016) — не покрывает `@Scheduled` jobs и исходящие HTTP-вызовы (DeepSeek/
+  CloudPayments/Telegram).
+- Prometheus alert-правила (ADR-018) требуют отдельно развёрнутого Alertmanager для routing, и
+  `AppNotReady` — отдельно развёрнутого `blackbox_exporter`; ни то ни другое не входит в репозиторий.
+- 4 из 15 frontend dependency vulnerabilities остаются (требуют breaking upgrade) — Stage 9/ADR-021.
 
 ## 7. Sign-off
 

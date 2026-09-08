@@ -1,8 +1,7 @@
 -- V20: Per-source AI catalog matcher thresholds (Prompt 05).
 --
--- Same schema-management note as V17/V18/V19: Flyway stays disabled in every profile, so this file
--- is the intended PostgreSQL-compatible target schema, not something actually applied. Dev/test/prod
--- all still rely on Hibernate `ddl-auto: update` against the JPA entities for the real schema.
+-- Schema management: same note as V18 (Stage 6/ADR-013) - baselined away in `prod`, real/executed
+-- everywhere else.
 --
 -- Both columns are nullable overrides of the global `supplier-import.matching.ai-auto-approve-min-
 -- score` / `ai-min-confidence` defaults (same override pattern as `commission_percent_override`);

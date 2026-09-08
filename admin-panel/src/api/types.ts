@@ -645,8 +645,15 @@ export interface CreateSupplierRequest {
   code?: string
 }
 
+export type SnapshotMode = 'FULL' | 'DELTA'
+
+export type PublicPriceStrategy = 'LOWEST_ACTIVE_OFFER'
+
+export type PriceRoundingPolicy = 'WHOLE_UNIT_HALF_UP' | 'NO_ROUNDING'
+
 export interface SupplierSource {
   id: number
+  version: number
   label: string
   supplierId: number
   supplierName: string
@@ -655,8 +662,15 @@ export interface SupplierSource {
   subjectPattern?: string
   filenamePattern?: string
   enabled: boolean
+  snapshotMode: SnapshotMode
+  snapshotScope: string
+  commissionPercentOverride?: number
+  publicPriceStrategy: PublicPriceStrategy
+  roundingPolicy: PriceRoundingPolicy
   shadowMode: boolean
   autoApply: boolean
+  aiAutoApproveMinScoreOverride?: number
+  aiMinConfidenceOverride?: number
 }
 
 export interface CreateSupplierSourceRequest {
@@ -666,6 +680,47 @@ export interface CreateSupplierSourceRequest {
   senderAllowlist?: string
   subjectPattern?: string
   filenamePattern?: string
+}
+
+/** Stage 1: PATCH merge-patch body. `undefined` = leave unchanged; `clear*` flags null out an override. */
+export interface UpdateSupplierSourceRequest {
+  expectedVersion?: number
+  label?: string
+  mailboxConnectionId?: number
+  clearMailboxConnectionId?: boolean
+  senderAllowlist?: string
+  subjectPattern?: string
+  filenamePattern?: string
+  enabled?: boolean
+  snapshotMode?: SnapshotMode
+  snapshotScope?: string
+  commissionPercentOverride?: number
+  clearCommissionPercentOverride?: boolean
+  roundingPolicy?: PriceRoundingPolicy
+  publicPriceStrategy?: PublicPriceStrategy
+  shadowMode?: boolean
+  autoApply?: boolean
+  confirmAutoApply?: boolean
+  aiAutoApproveMinScoreOverride?: number
+  clearAiAutoApproveMinScoreOverride?: boolean
+  aiMinConfidenceOverride?: number
+  clearAiMinConfidenceOverride?: boolean
+}
+
+// ========== Brand aliases (Stage 4 of the production-hardening pass) ==========
+
+export interface BrandAlias {
+  id: number
+  canonicalBrand: string
+  alias: string
+  normalizedAlias: string
+  createdBy?: string
+  createdAt?: string
+}
+
+export interface CreateBrandAliasRequest {
+  canonicalBrand: string
+  alias: string
 }
 
 // ========== Operations UI (Prompt 07 automation control panel) ==========

@@ -74,6 +74,13 @@ security:
     # Срок жизни токена в часах
     expiration-hours: ${JWT_EXPIRATION_HOURS:24}
 
+# App-wide (non-shop-scoped) admin settings
+app:
+  # Stage 8 security hardening: comma-separated AdminUser emails allowed to call platform-wide
+  # endpoints (POST /api/admin/webhooks/update-all, GET /api/stats). Empty by default = nobody
+  # can call them (fail closed) — these endpoints have no shopId to scope by AuthorizationService.
+  system-admin-emails: ${SYSTEM_ADMIN_EMAILS:}
+
 # Billing configuration
 billing:
   trial-days: ${BILLING_TRIAL_DAYS:7}
@@ -121,6 +128,18 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Stage 10: exposes /actuator/health/liveness and /actuator/health/readiness for container
+      # orchestrators (k8s livenessProbe/readinessProbe, docker-compose healthcheck). Readiness
+      # flips to false while the app is still starting/shutting down; liveness only reflects
+      # unrecoverable internal failure (see Spring Boot's AvailabilityChangeEvent), never a
+      # degraded-but-recoverable state like DeepSeek being down (see SupplierImportHealthIndicator).
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
 
 # Support Bot (feedback)
 support:
@@ -132,6 +151,12 @@ logging:
   level:
     com.plstk: INFO
     org.telegram: INFO
+  # Stage 10: [correlationId] tag on every log line, populated by CorrelationIdFilter from the
+  # inbound X-Correlation-Id header (or a fresh UUID if absent), so a single request's log lines -
+  # including ones straddling async @Scheduled pipeline stages that log the same batch/job id -
+  # can be grepped together in aggregated logs (CloudWatch/Loki/etc) without a tracing backend.
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(${PID:- }){magenta} %clr(---){faint} %clr([%15.15t]){faint} %clr([%X{correlationId:-OFF}]){yellow} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:-%wEx}"
 
 # Commerce MVP
 commerce:
@@ -177,8 +202,28 @@ commerce:
 # the polling job simply finds zero enabled mailboxes and no-ops.
 supplier-import:
   storage:
+    # local (default) or s3 - see docs/DECISIONS.md ADR-014. Any multi-replica deployment MUST
+    # switch to s3; local disk storage is invisible across replicas.
+    provider: ${SUPPLIER_IMPORT_STORAGE_PROVIDER:local}
     base-path: ${SUPPLIER_IMPORT_STORAGE_PATH:./data/import-files}
     max-file-size-bytes: ${SUPPLIER_IMPORT_MAX_FILE_SIZE_BYTES:31457280}
+    s3:
+      bucket: ${SUPPLIER_IMPORT_S3_BUCKET:}
+      region: ${SUPPLIER_IMPORT_S3_REGION:eu-central-1}
+      # Set for S3-compatible providers (MinIO, etc); leave blank for real AWS S3.
+      endpoint: ${SUPPLIER_IMPORT_S3_ENDPOINT:}
+      access-key-id: ${SUPPLIER_IMPORT_S3_ACCESS_KEY_ID:}
+      secret-access-key: ${SUPPLIER_IMPORT_S3_SECRET_ACCESS_KEY:}
+      path-style-access: ${SUPPLIER_IMPORT_S3_PATH_STYLE_ACCESS:false}
+      key-prefix: ${SUPPLIER_IMPORT_S3_KEY_PREFIX:}
+    # Stage 10 retention (docs/DECISIONS.md ADR-015): opt-in deletion of terminal-batch source
+    # files after fileRetentionDays. Disabled by default - an operator must explicitly enable it.
+    retention:
+      enabled: ${SUPPLIER_IMPORT_RETENTION_ENABLED:false}
+      file-retention-days: ${SUPPLIER_IMPORT_RETENTION_FILE_DAYS:180}
+      sweep-interval-ms: ${SUPPLIER_IMPORT_RETENTION_SWEEP_INTERVAL_MS:86400000}
+      sweep-initial-delay-ms: ${SUPPLIER_IMPORT_RETENTION_SWEEP_INITIAL_DELAY_MS:300000}
+      max-deletions-per-sweep: ${SUPPLIER_IMPORT_RETENTION_MAX_DELETIONS_PER_SWEEP:500}
   job:
     default-lease-seconds: ${SUPPLIER_IMPORT_JOB_LEASE_SECONDS:300}
     mailbox-poll-interval-ms: ${SUPPLIER_IMPORT_MAILBOX_POLL_INTERVAL_MS:300000}
@@ -199,17 +244,22 @@ supplier-import:
     apply-initial-delay-ms: ${SUPPLIER_IMPORT_APPLY_INITIAL_DELAY_MS:45000}
     apply-lease-seconds: ${SUPPLIER_IMPORT_APPLY_LEASE_SECONDS:600}
   # AI layout detection (Prompt 03) + AI catalog matcher (Prompt 05) share the same DeepSeek
-  # account/HTTP client config below. No key configured by default -> Disabled*/no-op providers are
-  # wired instead, and a batch/row that actually needs AI is quarantined/NEEDS_REVIEW with a clear
-  # reason instead of failing app startup.
+  # account/dedicated HTTP client (DeepSeekHttpClient/DeepSeekClientConfig, Stage 5) config below. No
+  # key configured by default -> Disabled*/no-op providers are wired instead, and a batch/row that
+  # actually needs AI is quarantined/NEEDS_REVIEW with a clear reason instead of failing app startup.
   ai:
     deepseek:
       api-key: ${SUPPLIER_IMPORT_DEEPSEEK_API_KEY:}
-      model: ${SUPPLIER_IMPORT_DEEPSEEK_MODEL:deepseek-chat}
+      model: ${SUPPLIER_IMPORT_DEEPSEEK_MODEL:deepseek-v4-flash}
       base-url: ${SUPPLIER_IMPORT_DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      connect-timeout-ms: ${SUPPLIER_IMPORT_DEEPSEEK_CONNECT_TIMEOUT_MS:5000}
       timeout-ms: ${SUPPLIER_IMPORT_DEEPSEEK_TIMEOUT_MS:20000}
       max-retries: ${SUPPLIER_IMPORT_DEEPSEEK_MAX_RETRIES:2}
       retry-backoff-ms: ${SUPPLIER_IMPORT_DEEPSEEK_RETRY_BACKOFF_MS:500}
+      max-concurrent-requests: ${SUPPLIER_IMPORT_DEEPSEEK_MAX_CONCURRENT_REQUESTS:4}
+      concurrency-acquire-timeout-ms: ${SUPPLIER_IMPORT_DEEPSEEK_CONCURRENCY_ACQUIRE_TIMEOUT_MS:3000}
+      circuit-breaker-failure-threshold: ${SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_FAILURE_THRESHOLD:5}
+      circuit-breaker-open-duration-ms: ${SUPPLIER_IMPORT_DEEPSEEK_CIRCUIT_BREAKER_OPEN_DURATION_MS:30000}
   parser:
     max-sheets: ${SUPPLIER_IMPORT_PARSER_MAX_SHEETS:10}
     max-rows-per-sheet: ${SUPPLIER_IMPORT_PARSER_MAX_ROWS:20000}

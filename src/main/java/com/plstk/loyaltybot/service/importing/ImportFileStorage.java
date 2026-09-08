@@ -29,4 +29,13 @@ public interface ImportFileStorage {
     InputStream open(String storageKey) throws IOException;
 
     boolean exists(String storageKey);
+
+    /**
+     * Удаляет объект по {@code storageKey}. Используется только retention-очисткой (Stage 10,
+     * {@code ImportFileRetentionJob}) для файлов, чей {@link ImportFile#getShopId()} batch уже
+     * прошёл retention window - никогда самим import pipeline (файл иммутабелен пока используется).
+     * No-op (не выбрасывает), если объект уже отсутствует, чтобы повторный/параллельный retention
+     * run был идемпотентен.
+     */
+    void delete(String storageKey) throws IOException;
 }

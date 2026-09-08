@@ -22,7 +22,14 @@ import org.springframework.stereotype.Component;
  *   <li>{@code supplier_import_job_claim_total{job_type=...,result=...}} - claim contention per
  *       job type; a high {@code contended} rate for a job type that should run on one instance
  *       may indicate the lease duration is too short relative to how long a run actually takes.</li>
+ *   <li>{@code supplier_import_retention_deletion_total{result=...}} - Stage 10 retention sweep
+ *       outcomes (deleted/failed); a rising {@code failed} rate usually means the storage backend
+ *       (S3 credentials/bucket policy, or a stale local-disk mount) needs attention.</li>
  * </ul>
+ *
+ * (The DeepSeek circuit breaker's state is exposed as a gauge directly by
+ * {@link DeepSeekCircuitBreaker} rather than here, since a {@code MeterRegistry} is optional
+ * there to keep its no-arg test constructor metrics-free.)
  *
  * Deliberately built directly on {@link MeterRegistry} (auto-configured by
  * spring-boot-starter-actuator) rather than a new abstraction - every counter is cheap,
@@ -56,6 +63,10 @@ public class SupplierImportMetrics {
 
     public void jobClaim(String jobType, String result) {
         counter("supplier_import_job_claim_total", "job_type", jobType, "result", result).increment();
+    }
+
+    public void retentionDeletion(String result) {
+        counter("supplier_import_retention_deletion_total", "result", result).increment();
     }
 
     private Counter counter(String name, String... tags) {

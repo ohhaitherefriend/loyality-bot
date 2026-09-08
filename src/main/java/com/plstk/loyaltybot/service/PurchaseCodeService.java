@@ -62,8 +62,13 @@ public class PurchaseCodeService {
         return sb.toString();
     }
     
-    public Optional<PurchaseCode> findByCode(String code) {
-        return purchaseCodeRepository.findByCode(code);
+    /**
+     * Looks up an active/used purchase code for admin redemption, scoped to the admin's shop
+     * (Stage 8 security hardening) so an admin from one shop can never redeem another shop's
+     * customer code even though {@code code} itself is a globally unique DB value.
+     */
+    public Optional<PurchaseCode> findByCode(String code, String shopId) {
+        return purchaseCodeRepository.findByCodeAndUser_ShopId(code, shopId);
     }
     
     @Transactional

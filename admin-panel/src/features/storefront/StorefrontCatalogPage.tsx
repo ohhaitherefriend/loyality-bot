@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Search } from 'lucide-react'
@@ -48,8 +48,8 @@ export function StorefrontCatalogPage() {
     enabled: !!shopId,
   })
 
-  const totalItems = useMemo(() => cart.totalItems(), [cart.lines])
-  const totalPrice = useMemo(() => cart.totalPrice(), [cart.lines])
+  const totalItems = cart.totalItems()
+  const totalPrice = cart.totalPrice()
 
   const handleAdd = (product: StorefrontProduct) => {
     cart.addItem({

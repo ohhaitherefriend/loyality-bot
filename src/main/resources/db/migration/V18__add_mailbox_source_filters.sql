@@ -1,8 +1,10 @@
 -- V18: Email ingestion mailbox routing filters (Prompt 02).
 --
--- Same schema-management note as V17: Flyway stays disabled in every profile, so this file is
--- the intended PostgreSQL-compatible target schema, not something actually applied. Dev/test/prod
--- all still rely on Hibernate `ddl-auto: update` against the JPA entities for the real schema.
+-- Schema management (Stage 6/ADR-013): Flyway is now enabled for `prod` with
+-- baseline-version=23 - this file is baselined away there (its schema is assumed already present
+-- from years of Hibernate `ddl-auto: update`) but is the real, executed source of truth for every
+-- fresh database (dev/test Testcontainers, new environments). See V24's comment for the full
+-- rationale.
 --
 -- One MailboxConnection can be shared by several SupplierSource rows (e.g. one shop inbox
 -- receiving price lists from several suppliers), so `folder` lives on the mailbox (it pins the

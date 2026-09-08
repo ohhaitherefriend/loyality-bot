@@ -9,7 +9,7 @@
 
 -- 1. Таблица настроек магазина (singleton)
 CREATE TABLE IF NOT EXISTS shop_settings (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     shop_name VARCHAR(255) NOT NULL DEFAULT 'Магазин',
     default_location_id VARCHAR(255),
     telegram_channel_url VARCHAR(500),
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS shop_settings (
     -- Статусы клиентов
     regular_threshold_purchases INT NOT NULL DEFAULT 3,
     vip_threshold_purchases INT NOT NULL DEFAULT 10,
-    vip_threshold_total_spend DOUBLE,
+    vip_threshold_total_spend DOUBLE PRECISION,
     lost_days_since_last_purchase INT NOT NULL DEFAULT 30,
     
     -- Авто-сообщения
@@ -52,7 +52,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS first_purchase_at TIMESTAMP;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_purchase_at TIMESTAMP;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS purchases_count INT DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS visits_count INT DEFAULT 0;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS total_spend DOUBLE DEFAULT 0.0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS total_spend DOUBLE PRECISION DEFAULT 0.0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS customer_status VARCHAR(50) DEFAULT 'NEW';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMP;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_fast_checkout_at TIMESTAMP;
@@ -61,7 +61,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS fast_checkout_count_reset_at TIMESTAM
 
 -- 3. Таблица штамп-кошельков
 CREATE TABLE IF NOT EXISTS stamp_wallets (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
     stamps_count INT NOT NULL DEFAULT 0,
     rewards_earned INT NOT NULL DEFAULT 0,
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS stamp_wallets (
 
 -- 4. Таблица кодов погашения наград
 CREATE TABLE IF NOT EXISTS redeem_codes (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     code VARCHAR(20) NOT NULL UNIQUE,
     user_id BIGINT NOT NULL,
     stamp_wallet_id BIGINT NOT NULL,
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS redeem_codes (
 ALTER TABLE purchase_codes ADD COLUMN IF NOT EXISTS location_id VARCHAR(255);
 ALTER TABLE purchase_codes ADD COLUMN IF NOT EXISTS from_deep_link BOOLEAN DEFAULT FALSE;
 ALTER TABLE purchase_codes ADD COLUMN IF NOT EXISTS fast_checkout BOOLEAN DEFAULT FALSE;
-ALTER TABLE purchase_codes ADD COLUMN IF NOT EXISTS purchase_amount DOUBLE;
+ALTER TABLE purchase_codes ADD COLUMN IF NOT EXISTS purchase_amount DOUBLE PRECISION;
 
 -- 6. Индексы для производительности
 CREATE INDEX IF NOT EXISTS idx_users_customer_status ON users(customer_status);
@@ -110,8 +110,44 @@ CREATE INDEX IF NOT EXISTS idx_redeem_codes_code ON redeem_codes(code);
 CREATE INDEX IF NOT EXISTS idx_redeem_codes_expires_at ON redeem_codes(expires_at);
 
 -- 7. Вставка настроек магазина по умолчанию (если нет)
-INSERT INTO shop_settings (shop_name, discount_tiers_enabled, fast_checkout_enabled, stamps_enabled, created_at, updated_at)
-SELECT 'Магазин', TRUE, FALSE, FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+--
+-- Every NOT NULL column of shop_settings is listed explicitly, including ones this migration's own
+-- CREATE TABLE doesn't declare (Stage 6/ADR-013): `discount_tier*`/`discount_validity_days`,
+-- `bonus_*` and `permanent_discount_enabled` were historically only ever added via Hibernate
+-- `ddl-auto: update` - no migration file (V9-V11 add some of the *other* bonus/discount columns,
+-- but never these) ever created them - so V0 (this session's Hibernate-generated baseline, see its
+-- header comment) is the only place in the migration chain that has them at all. This INSERT must
+-- not depend on this table's column DEFAULTs (V0 has none - Hibernate schema export only emits NOT
+-- NULL, never DEFAULT), so every value below is explicit; where a value matches an actual DEFAULT
+-- declared on the CREATE TABLE above it's that default, otherwise it's the ShopSettings entity
+-- field's Java-side default (@Builder.Default).
+INSERT INTO shop_settings (
+    shop_name, discount_tiers_enabled, fast_checkout_enabled,
+    fast_checkout_value, fast_checkout_cooldown_minutes, fast_checkout_daily_limit_per_customer,
+    stamps_enabled, stamps_per_fast_purchase, stamps_required_for_reward, reward_title,
+    redeem_requires_cashier_confirm, redeem_code_ttl_minutes,
+    regular_threshold_purchases, vip_threshold_purchases, lost_days_since_last_purchase,
+    auto_messages_enabled, auto_messages_daily_limit_per_customer,
+    discount_tier1amount, discount_tier1percent,
+    discount_tier2amount, discount_tier2percent,
+    discount_tier3amount, discount_tier3percent,
+    discount_validity_days, permanent_discount_enabled,
+    bonus_points_enabled, bonus_cashback_percent, bonus_max_spend_percent,
+    created_at, updated_at
+)
+SELECT
+    'Магазин', TRUE, FALSE,
+    1, 5, 10,
+    FALSE, 1, 10, 'Бесплатный напиток',
+    TRUE, 10,
+    3, 10, 30,
+    TRUE, 3,
+    20000.0, 5,
+    25000.0, 7,
+    30000.0, 10,
+    30, FALSE,
+    FALSE, 5, 100,
+    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
 WHERE NOT EXISTS (SELECT 1 FROM shop_settings);
 
 

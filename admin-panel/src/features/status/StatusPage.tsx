@@ -59,7 +59,7 @@ function StatusSkeleton() {
 }
 
 export function StatusPage() {
-  const { botInstanceId, botUsername, setShop, shopId } = useShopStore()
+  const { botInstanceId, botUsername, setShop } = useShopStore()
   const queryClient = useQueryClient()
 
   const { data: botsList } = useQuery({

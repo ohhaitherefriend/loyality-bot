@@ -6,10 +6,9 @@ import com.plstk.loyaltybot.entity.CustomerStatus;
 import com.plstk.loyaltybot.entity.User;
 import com.plstk.loyaltybot.repository.CustomerAchievementRepository;
 import com.plstk.loyaltybot.repository.RedeemCodeRepository;
-import com.plstk.loyaltybot.repository.ShopMemberRepository;
-import com.plstk.loyaltybot.repository.ShopRepository;
 import com.plstk.loyaltybot.repository.TransactionRepository;
 import com.plstk.loyaltybot.repository.UserRepository;
+import com.plstk.loyaltybot.service.AuthorizationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -33,8 +32,7 @@ public class ReportsController {
     private final TransactionRepository transactionRepository;
     private final CustomerAchievementRepository achievementRepository;
     private final RedeemCodeRepository redeemCodeRepository;
-    private final ShopRepository shopRepository;
-    private final ShopMemberRepository shopMemberRepository;
+    private final AuthorizationService authorizationService;
     
     private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter.ISO_DATE_TIME;
     
@@ -152,12 +150,7 @@ public class ReportsController {
     }
     
     private boolean hasAccessToShop(AdminUser user, String shopId) {
-        if (shopRepository.findByShopId(shopId)
-                .map(s -> s.getOwnerId().equals(user.getId()))
-                .orElse(false)) {
-            return true;
-        }
-        return shopMemberRepository.existsByUserIdAndShopId(user.getId(), shopId);
+        return authorizationService.hasAccess(user, shopId);
     }
     
     // ========== Response DTOs ==========

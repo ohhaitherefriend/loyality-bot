@@ -475,7 +475,7 @@ public class LoyaltyBotService {
             return;
         }
         
-        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim());
+        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim(), shopId);
         
         if (purchaseCodeOpt.isEmpty()) {
             sendMessage(ctx, chatId, "❌ Код не найден.", getUserKeyboard(admin, shopId));

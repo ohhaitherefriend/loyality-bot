@@ -649,7 +649,7 @@ public class LoyaltyBot extends TelegramLongPollingBot {
             return;
         }
         
-        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim());
+        Optional<PurchaseCode> purchaseCodeOpt = purchaseCodeService.findByCode(code.toUpperCase().trim(), admin.getShopId());
         
         if (purchaseCodeOpt.isEmpty()) {
             sendMessage(chatId, "❌ Код не найден. Проверьте правильность ввода.");
@@ -1292,7 +1292,7 @@ public class LoyaltyBot extends TelegramLongPollingBot {
      */
     private void handleCancelRedeemCallback(Long chatId, String data, User user) {
         String code = data.substring(CB_CANCEL_REDEEM.length());
-        Optional<RedeemCode> redeemCodeOpt = stampWalletService.findRedeemCode(code);
+        Optional<RedeemCode> redeemCodeOpt = stampWalletService.findRedeemCode(code, user.getShopId());
         
         if (redeemCodeOpt.isPresent() && redeemCodeOpt.get().isActive()) {
             stampWalletService.cancelRedeemCode(redeemCodeOpt.get());

@@ -3,6 +3,7 @@ package com.plstk.loyaltybot.service.importing;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.plstk.loyaltybot.config.SupplierImportProperties;
 import com.plstk.loyaltybot.entity.commerce.Product;
+import com.plstk.loyaltybot.entity.importing.BrandAlias;
 import com.plstk.loyaltybot.entity.importing.ImportBatch;
 import com.plstk.loyaltybot.entity.importing.ImportBatchStatus;
 import com.plstk.loyaltybot.entity.importing.ImportFile;
@@ -13,6 +14,7 @@ import com.plstk.loyaltybot.entity.importing.MatchDecisionType;
 import com.plstk.loyaltybot.entity.importing.Supplier;
 import com.plstk.loyaltybot.entity.importing.SupplierProductLink;
 import com.plstk.loyaltybot.entity.importing.SupplierSource;
+import com.plstk.loyaltybot.repository.BrandAliasRepository;
 import com.plstk.loyaltybot.repository.ImportBatchRepository;
 import com.plstk.loyaltybot.repository.ImportFileRepository;
 import com.plstk.loyaltybot.repository.ImportRowRepository;
@@ -68,6 +70,8 @@ class ImportBatchNormalizingServiceTest {
     private SupplierProductLinkRepository supplierProductLinkRepository;
     @Autowired
     private MatchDecisionRepository matchDecisionRepository;
+    @Autowired
+    private BrandAliasRepository brandAliasRepository;
     @Autowired
     private ImportBatchNormalizingService importBatchNormalizingService;
     @Autowired
@@ -170,6 +174,9 @@ class ImportBatchNormalizingServiceTest {
 
     @Test
     void chanelShanelChannel_fuzzyCandidate_taggedBrandAlias_neverAutoMatched() {
+        // Mirrors the default group V26 seeds for existing shops - this shop starts with an empty
+        // brand_aliases table (no Flyway in tests), so the group is seeded explicitly here.
+        seedChanelAliasGroup();
         Product chanel = saveProduct(SHOP_A, "Chanel", "Chanel No 5 100 ml", "3145891234560");
 
         Long batchId = createBatchWithRows(row(Map.of(
@@ -278,6 +285,16 @@ class ImportBatchNormalizingServiceTest {
                 .shopId(shopId).brand(brand).name(name).barcode(barcode).currency("RUB").build());
     }
 
+    private void seedChanelAliasGroup() {
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(SHOP_A).canonicalBrand("Chanel").alias("Chanel").normalizedAlias("chanel").build());
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(SHOP_A).canonicalBrand("Chanel").alias("Channel").normalizedAlias("channel").build());
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(SHOP_A).canonicalBrand("Chanel").alias("Шанель").normalizedAlias("шанель").build());
+        entityManager.flush();
+    }
+
     private Map<String, String> row(Map<String, String> values) {
         return new HashMap<>(values);
     }
@@ -343,8 +360,13 @@ class ImportBatchNormalizingServiceTest {
         }
 
         @Bean
-        BrandAliasResolver brandAliasResolver() {
-            return new BrandAliasResolver();
+        BrandNormalizer brandNormalizer() {
+            return new BrandNormalizer();
+        }
+
+        @Bean
+        BrandAliasResolver brandAliasResolver(BrandAliasRepository brandAliasRepository, BrandNormalizer brandNormalizer) {
+            return new BrandAliasResolver(brandAliasRepository, brandNormalizer);
         }
 
         @Bean
@@ -358,15 +380,16 @@ class ImportBatchNormalizingServiceTest {
         }
 
         @Bean
-        ProductCandidateFetcher productCandidateFetcher(ProductRepository productRepository) {
-            return new SimpleProductCandidateFetcher(productRepository);
+        ProductCandidateFetcher productCandidateFetcher(
+                ProductRepository productRepository, BrandAliasResolver brandAliasResolver, BrandNormalizer brandNormalizer) {
+            return new SimpleProductCandidateFetcher(productRepository, brandAliasResolver, brandNormalizer);
         }
 
         @Bean
         CandidateSearchService candidateSearchService(
                 ProductCandidateFetcher candidateFetcher, RowAttributeNormalizer normalizer,
-                CandidateScorer scorer, SupplierImportProperties properties) {
-            return new CandidateSearchService(candidateFetcher, normalizer, scorer, properties);
+                CandidateScorer scorer, SupplierImportProperties properties, BrandAliasResolver brandAliasResolver) {
+            return new CandidateSearchService(candidateFetcher, normalizer, scorer, properties, brandAliasResolver);
         }
 
         @Bean

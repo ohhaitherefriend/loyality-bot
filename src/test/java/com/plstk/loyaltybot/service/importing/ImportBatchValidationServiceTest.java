@@ -195,7 +195,7 @@ class ImportBatchValidationServiceTest {
         SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", true, false, null);
         Product product = productRepository.save(Product.builder().shopId(SHOP_A).name("Existing").currency("RUB").build());
         supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_A).supplier(supplier).supplierSource(source).product(product)
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope()).product(product)
                 .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
                 .calculatedSitePrice(new BigDecimal("130.00")).active(true).build());
         flushClear();

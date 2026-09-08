@@ -33,7 +33,7 @@ if (storedToken) {
 
 export const useAuthStore = create<AuthState>()(
   persist(
-    (set, get) => ({
+    (set, _get) => ({
       user: null,
       shops: [],
       needsOnboarding: false,
@@ -148,7 +148,7 @@ export const useAuthStore = create<AuthState>()(
           })
           
           return true
-        } catch (err) {
+        } catch {
           setAuthToken(null)
           sessionStorage.removeItem('auth-token')
           
