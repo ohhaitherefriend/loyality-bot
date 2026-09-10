@@ -109,4 +109,37 @@ class CloudPaymentsServiceTest {
 
         assertTrue(service.validateHmac("any body", null));
     }
+
+    /**
+     * Follow-up to the six-bug hardening pass: {@code confirm-payment} used
+     * {@link CloudPaymentsService#isLiveGatewayConfigured()} alone to decide whether client-side
+     * self-activation is allowed, so a production deployment that forgot to configure the
+     * CloudPayments secret would still let a client activate a subscription without any payment at
+     * all (reproduced by the report). {@link CloudPaymentsService#requiresWebhookConfirmation()}
+     * must reject self-activation in that exact case too.
+     */
+    @Test
+    void requiresWebhookConfirmation_noSecretConfiguredInProdProfile_isTrue() {
+        MockEnvironment prod = new MockEnvironment();
+        prod.addActiveProfile("prod");
+        CloudPaymentsService service = serviceWithSecret("", prod);
+
+        assertTrue(service.requiresWebhookConfirmation(),
+                "a missing secret in prod must never allow confirm-payment to self-activate a subscription");
+    }
+
+    @Test
+    void requiresWebhookConfirmation_noSecretConfiguredOutsideProdProfile_isFalse() {
+        MockEnvironment dev = new MockEnvironment();
+        dev.addActiveProfile("dev");
+        CloudPaymentsService service = serviceWithSecret("", dev);
+
+        assertFalse(service.requiresWebhookConfirmation(),
+                "dev/stub mode without a configured secret must still allow client self-activation");
+    }
+
+    @Test
+    void requiresWebhookConfirmation_secretConfigured_isTrueRegardlessOfProfile() {
+        assertTrue(serviceWithSecret(SECRET).requiresWebhookConfirmation());
+    }
 }

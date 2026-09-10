@@ -2434,3 +2434,122 @@ deliberately-separate non-blocking step) against the current `admin-panel/packag
    risk, but it has not been observed to actually fail a real CI run yet since there is no
    `critical`-severity advisory in the current dependency tree to trigger it.
 
+## ADR-028 — Six-bug hardening pass, follow-up: closing the acknowledged gaps in ADR-023/024/025/026 (2026-09-10)
+
+### Контекст
+
+A second user report, reproducing four gaps explicitly called out as "Осознанные ограничения" in
+ADR-023/024/025/026 — each fix from the first pass was real but incomplete:
+
+1. **ADR-023 gap (article matching)**: `resolveViaExactSupplierArticle` only rejected a
+   coincidental article match when the candidate product was already linked (via
+   `SupplierProductLink`) to a *different* supplier. A candidate with NO link at all yet (e.g. a
+   legacy manually catalogued product) had nothing to compare against, so the bare article-string
+   coincidence still resolved as `EXACT` — reproduced exactly as documented: a Dior row matched an
+   existing, never-linked Chanel product.
+2. **ADR-024 gap (candidate search ranking)**: the combined brand+name query used a single
+   "longest token" as the name signal. For a row like "Chanel No 5 100 ml", the longest token is
+   "chanel" itself — the brand name, shared by every product in that brand — so the combined query
+   was no more selective than the brand-only query. With 305 Chanel products, the id-ordered page
+   window still excluded the specific target product, and there was no ranking mechanism to
+   prioritize a genuinely distinctive match over an arbitrary same-brand one before truncating to
+   `candidateFetchLimit`.
+3. **ADR-025 gap (senderAllowlist enforcement)**: `assertReadyForAutoApply` (which includes the
+   non-blank `senderAllowlist` check) only ran when a PATCH was turning `autoApply` from `false` to
+   `true` in that same request. A PATCH to an already-`autoApply=true` source that blanked
+   `senderAllowlist` — without touching `autoApply` at all — sailed through unchecked, silently
+   making a live, unattended source accept mail from any sender.
+4. **ADR-026 gap (billing bypass)**: two related gaps in `BillingController`:
+   a. `confirm-payment` still activated a subscription client-side whenever
+      `isLiveGatewayConfigured()` was false — including in production if the CloudPayments secret
+      was simply never configured (a misconfiguration, not a legitimate dev/stub signal).
+   b. `activate-stub`/`extend-trial` were restricted to `MemberRole.OWNER`, but a shop's own owner
+      is a platform *customer*, not a platform operator — any shop could still grant itself a free
+      subscription even with a real payment gateway fully configured.
+
+### Решение
+
+1. **`DeterministicMatchResolver`**: `resolveViaExactSupplierArticle` now also requires a positive
+   brand-identity confirmation — the row's brand and the candidate's catalog brand must be the same
+   (exact normalized match, or a known/transliteration alias via the existing `BrandAliasResolver`)
+   — via a new `brandsConfirmIdentity` check. Unlike `CriticalAttributeConflictChecker` (lenient
+   about absent attributes), a missing brand on either side is treated as "cannot confirm" rather
+   than "no conflict", so it also rejects the match rather than assuming it's safe. This is a
+   second, independent gate alongside the existing different-supplier-link check from ADR-023 —
+   either one rejecting is enough to fall through to fuzzy/AI matching instead of guessing.
+2. **`SimpleProductCandidateFetcher`**: replaced the single "longest token" with a
+   `significantTokens` list — every distinctive token in the row's name (numeric tokens like a
+   volume number are kept at any length; alphabetic tokens need >=4 chars), excluding tokens
+   already covered by the brand, capped at 5 per row. The combined brand+token query
+   (`findByShopIdAndBrandTokenInAndNameToken`) now runs once per significant token instead of once
+   for the single longest one. Every fetched candidate accumulates a relevance score (brand-only
+   match = 1 point, brand+token match = 3 points, name-only token match = 2 points, id-ordered
+   backfill = 0), and the final merged pool is sorted by that score (highest first, ties broken by
+   id) BEFORE truncating to `candidateFetchLimit` — a naive insertion-order truncation could
+   previously let a large same-brand-only pool (many candidates, each with a low score) fill the
+   whole cap before a specifically token-matched candidate (inserted later, but far more relevant)
+   ever got a chance to survive.
+3. **`SupplierSourceAdminService`**: `validateInvariants` (which runs on EVERY `updateSource` call,
+   not just when a specific field transitions) now permanently rejects any resulting state where
+   `autoApply` is `true` and `senderAllowlist` is blank — regardless of whether this specific PATCH
+   is what turned `autoApply` on or it was already on. This closes the gap left by
+   `assertReadyForAutoApply`, which still only runs on the `false`->`true` transition and remains
+   the gate for `/graduate` and for confirming intent via `confirmAutoApply` on that transition.
+4. **`BillingController`/`CloudPaymentsService`**:
+   a. New `CloudPaymentsService#requiresWebhookConfirmation()` = `isLiveGatewayConfigured() ||
+      isProdProfile()` (reusing the same `Environment`-based prod-profile check ADR-026 added for
+      `validateHmac`). `confirmPayment` now calls this instead of `isLiveGatewayConfigured()` alone,
+      so a production deployment can never self-activate a subscription without a real,
+      webhook-confirmed payment, even if the secret was simply never configured.
+   b. New `AuthorizationService#isSystemAdmin(AdminUser)` — the `SYSTEM_ADMIN_EMAILS`-based
+      platform-administrator check, moved out of `AdminApiController` (which now delegates to it)
+      so it's one shared definition of "platform administrator", distinct from any shop-scoped
+      `MemberRole` including `OWNER`. `activate-stub`/`extend-trial` now require
+      `authorizationService.isSystemAdmin(user)` instead of `hasRole(user, shopId,
+      MemberRole.OWNER)` — a shop's own owner alone can no longer reach either endpoint.
+
+### Тесты
+
+- `LargeCatalogMatchingTest#coincidentalArticleCollisionAgainstNeverLinkedProduct_isNeverAutoMatchedAsExact`
+  (new) reproduces the exact new repro: a never-linked Chanel product, a Dior row with the same
+  article string — asserts it is never auto-matched. `#exactArticleMatch_againstNeverLinkedProduct_stillResolves_whenBrandsAgree`
+  (new) confirms the legitimate same-brand/never-linked case (the reason this resolution stage
+  exists at all) still works.
+- `LargeCatalogMatchingTest`'s existing brand/candidate-search cases (`#brandWithMoreThan300Items_...`,
+  typo/transliteration cases) all still pass unchanged against the new ranking logic.
+- `SupplierSourceAdminServiceTest#patch_blankingSenderAllowlist_whileAutoApplyAlreadyOn_isRejected`
+  (new) reproduces the exact new repro: graduate a source (autoApply on), then PATCH only
+  `senderAllowlist=""` — asserts rejection. `#patch_unrelatedField_onAlreadyLiveSource_stillSucceeds`
+  (new) confirms an unrelated PATCH to an already-live source is unaffected.
+- `CloudPaymentsServiceTest#requiresWebhookConfirmation_noSecretConfiguredInProdProfile_isTrue`/
+  `#requiresWebhookConfirmation_noSecretConfiguredOutsideProdProfile_isFalse`/
+  `#requiresWebhookConfirmation_secretConfigured_isTrueRegardlessOfProfile` (new).
+  `BillingControllerTest#confirmPayment_inProdProfileWithoutSecret_returnsConflictWithoutActivating`
+  (new) reproduces the exact repro at the controller level.
+- `BillingControllerTest#activateStub_asShopOwnerWhoIsNotSystemAdmin_isForbidden`/
+  `#activateStub_asPlatformSystemAdmin_succeeds`/`#extendTrial_asShopOwnerWhoIsNotSystemAdmin_isForbidden`
+  (new, replacing the old `#activateStub_asOwner_succeeds` which asserted the now-closed gap).
+- Full suite: 347 backend tests, 346 passed, 1 pre-existing Docker-only environment error
+  (`FlywayPostgresSchemaTest`, unrelated, requires a local Docker daemon this sandbox doesn't have).
+
+### Осознанные ограничения
+
+1. **`resolveViaExactSupplierArticle`'s brand check still trusts `Product.brand`/row `brand` as
+   free text** — a supplier or a legacy import that mislabels a product's brand (not merely
+   omitting it) could still defeat this check. This is the same class of risk every other
+   brand-based signal in this codebase already accepts (`BrandAliasResolver`, `CandidateScorer`).
+2. **`significantTokens` ranking is still a bounded, per-row heuristic, not a real search index** —
+   for a catalog where the correct product doesn't share ANY distinctive token with the row (e.g. a
+   completely renamed product), it can still fall out of the shortlist. This pass specifically
+   closes the reported "longest token is the brand itself" gap; it does not replace `candidateFetchLimit`
+   with an unbounded search.
+3. **The `senderAllowlist`-blank-while-autoApply invariant does not retroactively re-run the other
+   `assertReadyForAutoApply` graduation checks (shadow batch history, open blocking batches,
+   unresolved NEEDS_REVIEW)** on every PATCH — only on the `false`->`true` transition, as before.
+   Those checks are about "is this source ready to graduate", a one-time gate; `senderAllowlist`
+   was singled out because it's the one check whose violation degrades an *already-running*
+   automation's safety, not just its initial qualification.
+4. **`isSystemAdmin` is still an email allowlist in application config, not a database-backed
+   role** — same trade-off already accepted for the pre-existing `AdminApiController` platform-wide
+   endpoints (ADR-020); this pass reuses that exact mechanism rather than introducing a new one.
+

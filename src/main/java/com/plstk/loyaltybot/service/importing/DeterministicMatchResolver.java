@@ -34,18 +34,24 @@ public class DeterministicMatchResolver {
     private final RowAttributeNormalizer normalizer;
     private final CriticalAttributeConflictChecker conflictChecker;
     private final CandidateSearchService candidateSearchService;
+    private final BrandNormalizer brandNormalizer;
+    private final BrandAliasResolver brandAliasResolver;
 
     public DeterministicMatchResolver(
             SupplierProductLinkRepository supplierProductLinkRepository,
             ProductRepository productRepository,
             RowAttributeNormalizer normalizer,
             CriticalAttributeConflictChecker conflictChecker,
-            CandidateSearchService candidateSearchService) {
+            CandidateSearchService candidateSearchService,
+            BrandNormalizer brandNormalizer,
+            BrandAliasResolver brandAliasResolver) {
         this.supplierProductLinkRepository = supplierProductLinkRepository;
         this.productRepository = productRepository;
         this.normalizer = normalizer;
         this.conflictChecker = conflictChecker;
         this.candidateSearchService = candidateSearchService;
+        this.brandNormalizer = brandNormalizer;
+        this.brandAliasResolver = brandAliasResolver;
     }
 
     /** See {@link CandidateSearchService#startNewBatch} - call once per shop before this batch's row loop. */
@@ -146,10 +152,21 @@ public class DeterministicMatchResolver {
      * the same article string for two completely unrelated products is common, not a signal of
      * the same product. {@code Product.supplierArticle} is a single denormalized column (whichever
      * supplier most recently wrote it), so a bare {@code shopId + supplierArticle} lookup is
-     * effectively unscoped by supplier. If this candidate product is already linked (via
-     * {@link SupplierProductLink}) to a <em>different</em> supplier, that coincidental match is
-     * rejected instead of silently substituting one supplier's price/stock onto another supplier's
-     * product (see docs/DECISIONS.md ADR-023).
+     * effectively unscoped by supplier. Two independent safeguards are required before this is
+     * trusted, neither sufficient alone (see docs/DECISIONS.md ADR-023/ADR-028):
+     * <ol>
+     *   <li>if this candidate product is already linked (via {@link SupplierProductLink}) to a
+     *       <em>different</em> supplier, the coincidental match is rejected outright - this alone
+     *       does NOT cover a candidate with no link to any supplier yet (e.g. a legacy manually
+     *       catalogued product), which is the gap ADR-028 closes;</li>
+     *   <li>the row's own brand must match (exactly, or via {@link BrandAliasResolver}/{@link
+     *       BrandNormalizer} transliteration) the candidate's catalog brand - a coincidental article
+     *       collision across two different brands (e.g. a Dior row against an existing Chanel
+     *       product with no link yet) is never trusted as "confirmed supplier+article identity"
+     *       just because the bare article string happens to match. Either side missing a brand
+     *       entirely means identity can't be confirmed either way, so the match is rejected rather
+     *       than assumed safe.</li>
+     * </ol>
      */
     private Optional<MatchResolution> resolveViaExactSupplierArticle(String shopId, Long supplierId, NormalizedRowData row) {
         if (row.externalSku() == null || row.externalSku().isBlank()) {
@@ -163,12 +180,40 @@ public class DeterministicMatchResolver {
         if (supplierProductLinkRepository.existsByShopIdAndProductIdAndSupplierIdNot(shopId, candidate.getId(), supplierId)) {
             return Optional.empty();
         }
+        if (!brandsConfirmIdentity(shopId, row.brand(), candidate.getBrand())) {
+            return Optional.empty();
+        }
         NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
         List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
         if (!conflicts.isEmpty()) {
             return Optional.empty();
         }
         return Optional.of(MatchResolution.resolved(candidate.getId(), MatchDecisionType.EXACT));
+    }
+
+    /**
+     * True only when both brands are present and are the same brand (exact normalized match, or a
+     * known/transliteration alias per {@link BrandAliasResolver}) - the positive "confirmed
+     * supplier+article identity" signal required by {@link #resolveViaExactSupplierArticle}
+     * (ADR-028). A missing brand on either side is treated as "cannot confirm", not as "no
+     * conflict" - unlike {@link CriticalAttributeConflictChecker}, which is deliberately lenient
+     * about absent attributes, this is a required POSITIVE signal, not merely the absence of a
+     * negative one.
+     */
+    private boolean brandsConfirmIdentity(String shopId, String rowBrand, String candidateBrand) {
+        if (rowBrand == null || rowBrand.isBlank() || candidateBrand == null || candidateBrand.isBlank()) {
+            return false;
+        }
+        String normalizedRow = brandNormalizer.normalize(rowBrand);
+        String normalizedCandidate = brandNormalizer.normalize(candidateBrand);
+        if (normalizedRow == null || normalizedRow.isEmpty()
+                || normalizedCandidate == null || normalizedCandidate.isEmpty()) {
+            return false;
+        }
+        if (normalizedRow.equals(normalizedCandidate)) {
+            return true;
+        }
+        return brandAliasResolver.areAliases(shopId, rowBrand, candidateBrand);
     }
 
     private Optional<MatchResolution> resolveViaSafeFingerprint(NormalizedRowData row, List<ScoredCandidate> scored) {

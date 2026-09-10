@@ -53,12 +53,22 @@ class BillingControllerTest {
     private static final String SECRET = "test-cloudpayments-secret";
 
     private BillingController controllerWithSecret(String apiSecret) {
+        return controllerWithSecretAndEnvironment(apiSecret, new MockEnvironment());
+    }
+
+    private BillingController controllerWithSecretAndEnvironment(String apiSecret, MockEnvironment environment) {
+        return controllerWithSecretEnvironmentAndSystemAdmins(apiSecret, environment, "");
+    }
+
+    private BillingController controllerWithSecretEnvironmentAndSystemAdmins(
+            String apiSecret, MockEnvironment environment, String systemAdminEmails) {
         SubscriptionService subscriptionService = new SubscriptionService(subscriptionRepository, planRepository);
         CloudPaymentsService cloudPaymentsService =
-                new CloudPaymentsService(subscriptionService, planRepository, new MockEnvironment());
+                new CloudPaymentsService(subscriptionService, planRepository, environment);
         ReflectionTestUtils.setField(cloudPaymentsService, "apiSecret", apiSecret);
         ReflectionTestUtils.setField(cloudPaymentsService, "publicId", "pk_test");
         AuthorizationService authorizationService = new AuthorizationService(shopRepository, shopMemberRepository);
+        ReflectionTestUtils.setField(authorizationService, "systemAdminEmailsRaw", systemAdminEmails);
         return new BillingController(subscriptionService, cloudPaymentsService, authorizationService, planRepository);
     }
 
@@ -146,8 +156,8 @@ class BillingControllerTest {
 
     /**
      * Six-bug hardening pass (ADR-026): {@code activate-stub}/{@code extend-trial} grant billing
-     * state without any real payment, so an ordinary {@code STAFF}/{@code ADMIN} shop member must
-     * never be able to call them - only the shop owner can.
+     * state without any real payment, so an ordinary {@code STAFF} shop member must never be able
+     * to call them.
      */
     @Test
     void activateStub_asOrdinaryStaffMember_isForbidden() {
@@ -165,19 +175,38 @@ class BillingControllerTest {
         verify(subscriptionRepository, never()).findByShopId("shop-1");
     }
 
+    /**
+     * Follow-up to the six-bug hardening pass (ADR-028): restricting to {@code OWNER} (ADR-026)
+     * was insufficient - a shop's own owner is a platform CUSTOMER, not a platform operator, and
+     * could still grant their own shop a free subscription. Reproduced by the report: with a real
+     * payment gateway configured, an ordinary shop owner could still reach {@code activate-stub}.
+     */
     @Test
-    void activateStub_asOwner_succeeds() {
-        BillingController controller = controllerWithSecret("");
+    void activateStub_asShopOwnerWhoIsNotSystemAdmin_isForbidden() {
+        BillingController controller = controllerWithSecretEnvironmentAndSystemAdmins(
+                SECRET, new MockEnvironment(), "admin@platform.example");
         AdminUser owner = AdminUser.builder().id(1L).email("owner@example.com").build();
+        lenient().when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+
+        var response = controller.activateStub("shop-1", "BASIC_MONTHLY", owner);
+
+        assertEquals(403, response.getStatusCode().value());
+        verify(subscriptionRepository, never()).findByShopId("shop-1");
+    }
+
+    @Test
+    void activateStub_asPlatformSystemAdmin_succeeds() {
+        BillingController controller = controllerWithSecretEnvironmentAndSystemAdmins(
+                SECRET, new MockEnvironment(), "admin@platform.example");
+        AdminUser platformAdmin = AdminUser.builder().id(99L).email("admin@platform.example").build();
         com.plstk.loyaltybot.entity.Subscription existing =
                 com.plstk.loyaltybot.entity.Subscription.builder().id(1L).shopId("shop-1").build();
-        when(shopRepository.findByShopId("shop-1"))
-                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
         when(subscriptionRepository.findByShopId("shop-1")).thenReturn(Optional.of(existing));
         when(subscriptionRepository.save(existing)).thenReturn(existing);
         when(planRepository.findByCode("BASIC_MONTHLY")).thenReturn(Optional.empty());
 
-        var response = controller.activateStub("shop-1", "BASIC_MONTHLY", owner);
+        var response = controller.activateStub("shop-1", "BASIC_MONTHLY", platformAdmin);
 
         assertEquals(200, response.getStatusCode().value());
     }
@@ -195,6 +224,40 @@ class BillingControllerTest {
         var response = controller.extendTrial("shop-1", 7, admin);
 
         assertEquals(403, response.getStatusCode().value());
+        verify(subscriptionRepository, never()).findByShopId("shop-1");
+    }
+
+    @Test
+    void extendTrial_asShopOwnerWhoIsNotSystemAdmin_isForbidden() {
+        BillingController controller = controllerWithSecretEnvironmentAndSystemAdmins(
+                "", new MockEnvironment(), "admin@platform.example");
+        AdminUser owner = AdminUser.builder().id(1L).email("owner@example.com").build();
+        lenient().when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+
+        var response = controller.extendTrial("shop-1", 7, owner);
+
+        assertEquals(403, response.getStatusCode().value());
+        verify(subscriptionRepository, never()).findByShopId("shop-1");
+    }
+
+    /**
+     * Follow-up to the six-bug hardening pass (ADR-028): {@code confirm-payment} must reject
+     * client-side self-activation in production even when the CloudPayments secret is missing -
+     * a missing secret in prod is a misconfiguration, not a legitimate dev/stub signal.
+     */
+    @Test
+    void confirmPayment_inProdProfileWithoutSecret_returnsConflictWithoutActivating() {
+        MockEnvironment prod = new MockEnvironment();
+        prod.addActiveProfile("prod");
+        BillingController controller = controllerWithSecretAndEnvironment("", prod);
+        AdminUser owner = AdminUser.builder().id(1L).email("owner@example.com").build();
+        lenient().when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+
+        var response = controller.confirmPayment("shop-1", "BASIC_MONTHLY", owner);
+
+        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
         verify(subscriptionRepository, never()).findByShopId("shop-1");
     }
 }

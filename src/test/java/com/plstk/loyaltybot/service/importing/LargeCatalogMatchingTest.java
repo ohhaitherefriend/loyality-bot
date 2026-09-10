@@ -65,7 +65,8 @@ class LargeCatalogMatchingTest {
         candidateSearchService = new CandidateSearchService(fetcher, normalizer, scorer, properties, brandAliasResolver);
         matchResolver = new DeterministicMatchResolver(
                 supplierProductLinkRepository, productRepository, normalizer,
-                new CriticalAttributeConflictChecker(), candidateSearchService);
+                new CriticalAttributeConflictChecker(), candidateSearchService,
+                brandNormalizer, brandAliasResolver);
 
         brandAliasRepository.save(BrandAlias.builder()
                 .shopId(SHOP_ID).canonicalBrand("Chanel").alias("Chanel").normalizedAlias("chanel").build());
@@ -217,5 +218,63 @@ class LargeCatalogMatchingTest {
         assertFalse(resolution.isResolved() && chanel.getId().equals(resolution.matchedProductId()),
                 "a bare article-number coincidence from a DIFFERENT supplier must never auto-match "
                         + "onto a product already linked to another supplier");
+    }
+
+    /**
+     * Follow-up to the six-bug hardening pass: the {@code SupplierProductLink}-based guard above
+     * only rejects a coincidental article match when the candidate product is ALREADY linked to a
+     * different supplier. It does nothing for a candidate with NO link at all yet - e.g. a legacy
+     * manually catalogued product - which is exactly the scenario the follow-up report reproduced:
+     * a brand-new Dior row matching an existing, never-linked Chanel product as EXACT purely
+     * because the article string coincided. A required brand-identity check closes this gap.
+     */
+    @Test
+    void coincidentalArticleCollisionAgainstNeverLinkedProduct_isNeverAutoMatchedAsExact() {
+        Supplier supplierB = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier B").build());
+
+        Product chanel = productRepository.save(Product.builder()
+                .shopId(SHOP_ID).brand("Chanel").name("Chanel No 5 100 ml")
+                .supplierArticle("SAME-ARTICLE-999").currency("RUB").build());
+        // Deliberately NO SupplierProductLink at all for this product - e.g. it was catalogued by a
+        // legacy manual import, never through the supplier-import pipeline.
+        entityManager.flush();
+
+        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Dior",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Dior Sauvage 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SAME-ARTICLE-999"));
+
+        MatchResolution resolution = matchResolver.resolve(SHOP_ID, supplierB.getId(), diorRowFromSupplierB);
+
+        assertFalse(resolution.isResolved() && chanel.getId().equals(resolution.matchedProductId()),
+                "a bare article-number coincidence must never auto-match across two different "
+                        + "brands, even when the candidate has no SupplierProductLink at all yet");
+    }
+
+    /**
+     * Confirms the brand-identity check does not break the legitimate case
+     * {@code resolveViaExactSupplierArticle} exists for: a supplier's very first batch matching a
+     * legacy, never-linked catalog product by article - as long as the row's own brand actually
+     * agrees with the candidate's brand, it must still resolve as EXACT.
+     */
+    @Test
+    void exactArticleMatch_againstNeverLinkedProduct_stillResolves_whenBrandsAgree() {
+        Supplier supplierC = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier C").build());
+
+        Product chanel = productRepository.save(Product.builder()
+                .shopId(SHOP_ID).brand("Chanel").name("Chanel No 5 100 ml")
+                .supplierArticle("LEGACY-ARTICLE-1").currency("RUB").build());
+        entityManager.flush();
+
+        NormalizedRowData chanelRowFromSupplierC = normalizer.normalize(Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No 5 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "LEGACY-ARTICLE-1"));
+
+        MatchResolution resolution = matchResolver.resolve(SHOP_ID, supplierC.getId(), chanelRowFromSupplierC);
+
+        assertTrue(resolution.isResolved() && chanel.getId().equals(resolution.matchedProductId()),
+                "a same-brand article match against a never-linked legacy product must still "
+                        + "resolve as EXACT");
     }
 }

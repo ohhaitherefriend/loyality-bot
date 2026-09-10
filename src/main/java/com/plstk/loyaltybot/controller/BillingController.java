@@ -2,7 +2,6 @@ package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.AdminUser;
 import com.plstk.loyaltybot.entity.Plan;
-import com.plstk.loyaltybot.entity.ShopMember.MemberRole;
 import com.plstk.loyaltybot.entity.Subscription;
 import com.plstk.loyaltybot.repository.PlanRepository;
 import com.plstk.loyaltybot.service.AuthorizationService;
@@ -53,9 +52,11 @@ public class BillingController {
     }
 
     /**
-     * Stub activation grants a subscription without any real payment, so it must never be reachable
-     * by an ordinary shop member the way plain {@code hasAccess} would allow - restricted to the
-     * shop owner, same floor as {@code /graduate} for supplier-import automation (ADR-026).
+     * Stub activation grants a subscription without any real payment. A shop's own {@code OWNER}
+     * is still just a platform customer, not an operator - restricting to {@code OWNER} (as a
+     * prior pass did, ADR-026) was insufficient, since it lets any shop grant itself a free
+     * subscription. Restricted to platform administrators only (ADR-028), the same allowlist used
+     * by {@code AdminApiController}'s platform-wide endpoints.
      */
     @PostMapping("/activate-stub")
     public ResponseEntity<SubscriptionResponse> activateStub(
@@ -63,7 +64,7 @@ public class BillingController {
             @RequestParam(defaultValue = "BASIC_MONTHLY") String planCode,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!authorizationService.hasRole(user, shopId, MemberRole.OWNER)) {
+        if (!authorizationService.isSystemAdmin(user)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -77,14 +78,14 @@ public class BillingController {
         }
     }
 
-    /** Same OWNER floor as {@link #activateStub} - free trial time is a billing bypass too (ADR-026). */
+    /** Same platform-admin floor as {@link #activateStub} - free trial time is a billing bypass too (ADR-028). */
     @PostMapping("/extend-trial")
     public ResponseEntity<SubscriptionResponse> extendTrial(
             @RequestParam String shopId,
             @RequestParam(defaultValue = "7") int days,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!authorizationService.hasRole(user, shopId, MemberRole.OWNER)) {
+        if (!authorizationService.isSystemAdmin(user)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -156,6 +157,11 @@ public class BillingController {
      * calls after actually verifying the charge. Without a configured secret (dev/stub mode, same
      * signal {@link CloudPaymentsService#validateHmac} uses), this keeps its previous behavior so
      * local development and demo shops are unaffected.
+     *
+     * <p>ADR-028: a missing secret while actually running the {@code prod} profile is a
+     * misconfiguration, not a legitimate dev/stub signal - {@link
+     * CloudPaymentsService#requiresWebhookConfirmation()} rejects self-activation in that case too,
+     * so production can never activate a subscription without a real, webhook-confirmed payment.
      */
     @PostMapping("/confirm-payment")
     public ResponseEntity<?> confirmPayment(
@@ -167,9 +173,10 @@ public class BillingController {
             return ResponseEntity.status(403).build();
         }
 
-        if (cloudPaymentsService.isLiveGatewayConfigured()) {
+        if (cloudPaymentsService.requiresWebhookConfirmation()) {
             log.warn("Rejected client-triggered confirm-payment for shopId={} - live gateway "
-                    + "configured, must wait for the HMAC-validated webhook", shopId);
+                    + "configured or running in prod without one, must wait for the "
+                    + "HMAC-validated webhook", shopId);
             return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(
                     "AWAITING_WEBHOOK_CONFIRMATION",
                     "Payment must be confirmed by the payment provider's webhook"));

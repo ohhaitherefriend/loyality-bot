@@ -6,9 +6,13 @@ import com.plstk.loyaltybot.entity.ShopMember.MemberRole;
 import com.plstk.loyaltybot.repository.ShopMemberRepository;
 import com.plstk.loyaltybot.repository.ShopRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.Arrays;
 import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Single source of truth for shop-scoped authorization (Stage 7).
@@ -31,6 +35,17 @@ public class AuthorizationService {
 
     private final ShopRepository shopRepository;
     private final ShopMemberRepository shopMemberRepository;
+
+    /**
+     * Platform-wide administrator allowlist (previously duplicated in {@code AdminApiController}
+     * as {@code systemAdminEmailsRaw}/{@code isSystemAdmin} - centralized here so every caller,
+     * including {@code BillingController}'s billing-bypass endpoints (ADR-028), shares one
+     * definition of "platform administrator" instead of each re-implementing the same parsing.
+     * Empty by default, which fails closed - nobody can call these until an operator explicitly
+     * lists their own email here.
+     */
+    @Value("${app.system-admin-emails:}")
+    private String systemAdminEmailsRaw;
 
     /**
      * Resolves the caller's effective role for the given shop, or empty if they have no access
@@ -70,5 +85,24 @@ public class AuthorizationService {
      */
     public boolean isAtLeast(MemberRole role, MemberRole minRole) {
         return role.ordinal() <= minRole.ordinal();
+    }
+
+    /**
+     * True if {@code user} is one of the operator-configured platform administrators - distinct
+     * from any shop-scoped {@link MemberRole}, including a shop's own {@code OWNER}. A shop owner
+     * is a platform customer, not a platform operator: billing-bypass actions (stub activation,
+     * trial extension) and other platform-wide endpoints must never be satisfied merely by being
+     * the owner of the shop they're acting on (see docs/DECISIONS.md ADR-028).
+     */
+    public boolean isSystemAdmin(AdminUser user) {
+        if (user == null || user.getEmail() == null || systemAdminEmailsRaw == null) {
+            return false;
+        }
+        Set<String> allowed = Arrays.stream(systemAdminEmailsRaw.split(","))
+                .map(String::trim)
+                .filter(email -> !email.isBlank())
+                .map(String::toLowerCase)
+                .collect(Collectors.toSet());
+        return allowed.contains(user.getEmail().toLowerCase());
     }
 }

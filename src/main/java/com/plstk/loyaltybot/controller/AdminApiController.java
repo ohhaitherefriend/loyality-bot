@@ -18,16 +18,12 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * REST API для Web-админки.
@@ -47,14 +43,6 @@ public class AdminApiController {
     private final SubscriptionService subscriptionService;
     private final AuthorizationService authorizationService;
 
-    /**
-     * Stage 8 security hardening: {@code /admin/webhooks/update-all} and {@code /stats} are
-     * platform-wide (not shop-scoped, so {@link AuthorizationService} does not apply to them) and
-     * were previously reachable by any authenticated {@link AdminUser}. Empty by default, which
-     * fails closed — nobody can call them until an operator explicitly lists their own email here.
-     */
-    @Value("${app.system-admin-emails:}")
-    private String systemAdminEmailsRaw;
     
     // ========== Bot Connection ==========
     
@@ -440,18 +428,12 @@ public class AdminApiController {
 
     /**
      * True if {@code user} is one of the operator-configured system admins allowed to call
-     * platform-wide (non-shop-scoped) endpoints. See {@link #systemAdminEmailsRaw}.
+     * platform-wide (non-shop-scoped) endpoints. Delegates to {@link AuthorizationService}, which
+     * is the single shared definition of "platform administrator" (also used by {@code
+     * BillingController}'s billing-bypass endpoints, ADR-028).
      */
     private boolean isSystemAdmin(AdminUser user) {
-        if (user == null || user.getEmail() == null) {
-            return false;
-        }
-        Set<String> allowed = Arrays.stream(systemAdminEmailsRaw.split(","))
-                .map(String::trim)
-                .filter(email -> !email.isBlank())
-                .map(String::toLowerCase)
-                .collect(Collectors.toSet());
-        return allowed.contains(user.getEmail().toLowerCase());
+        return authorizationService.isSystemAdmin(user);
     }
     
     private boolean hasAccessToBot(AdminUser user, Long botId) {

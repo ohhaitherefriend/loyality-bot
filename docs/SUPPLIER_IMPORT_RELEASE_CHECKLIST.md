@@ -1,16 +1,18 @@
-# Supplier Import Automation — Release Checklist (обновлено после третьего раунда — 6 bug fixes)
+# Supplier Import Automation — Release Checklist (обновлено после четвёртого раунда — closing round-3 gaps)
 
 Итог финальной ревизии (`prompts/10-final-review.md`) поверх end-to-end supplier-import pipeline
 (Prompt 01-09), обновлён после второго hardening-раунда ("Stage 1-10 automatic supplier-import
 hardening": `SupplierSource` PATCH/graduate, `NEEDS_ATTENTION` approve, FULL snapshot scope fix,
 large-catalog matching + brand aliases, DeepSeek hardening, Postgres/Flyway, role-aware auth,
-security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-011…021), и **снова
-обновлён** после третьего раунда — шесть существенных, независимо воспроизведённых пользователем
-багов в областях, ранее объявленных "resolved" вторым раундом (FULL snapshot, article matching,
-candidate search limit, autoApply gates, CloudPayments/billing, CI branch — `docs/DECISIONS.md`
-ADR-022…027). Это операционный чеклист для человека, включающего автоматизацию для реального
-поставщика/окружения — не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений
-(см. `docs/DECISIONS.md`).
+security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-011…021), обновлён
+после третьего раунда — шесть существенных, независимо воспроизведённых пользователем багов в
+областях, ранее объявленных "resolved" вторым раундом (FULL snapshot, article matching, candidate
+search limit, autoApply gates, CloudPayments/billing, CI branch — `docs/DECISIONS.md` ADR-022…027),
+и **снова обновлён** после четвёртого раунда — тот же пользователь воспроизвёл ещё четыре гэпа,
+каждый из которых уже был явно назван как "Осознанное ограничение" в ADR-023/024/025/026 раунда 3
+(`docs/DECISIONS.md` ADR-028). Это операционный чеклист для человека, включающего автоматизацию для
+реального поставщика/окружения — не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал
+решений (см. `docs/DECISIONS.md`).
 
 ## 1. Build/test gate (обязательно перед релизом)
 
@@ -19,7 +21,7 @@ ADR-022…027). Это операционный чеклист для челов
 | Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-10) |
 | --- | --- | --- |
 | Backend компиляция | `./mvnw -q -o compile` | без ошибок |
-| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 337, Failures: 0, Errors: 1` (1 error = `FlywayPostgresSchemaTest`, требует локальный Docker — pre-existing environment limitation, не регрессия; на CI runner'е с Docker ожидается `Errors: 0`) |
+| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 347, Failures: 0, Errors: 1` (1 error = `FlywayPostgresSchemaTest`, требует локальный Docker — pre-existing environment limitation, не регрессия; на CI runner'е с Docker ожидается `Errors: 0`) |
 | Backend package | `./mvnw -o package -DskipTests` | success |
 | Frontend lint | `npm run lint` (в `admin-panel/`) | `0 errors` (несколько pre-existing warnings, не блокирующие) |
 | Frontend build | `npm run build` (в `admin-panel/`) | success (bundle warning про chunk size — известный, не блокирующий) |
@@ -150,6 +152,41 @@ Prompt 09/ADR-009) запускаются в составе обычного bac
 проверкой, что код компилируется). Build/test gate §1 подтверждает отсутствие регрессий в остальном
 пайплайне после этих изменений.
 
+## 2c. Раунд 4 (2026-09-10) — закрытие осознанных ограничений раунда 3
+
+Раунд 3 (§2b) закрыл шесть багов, но четыре из шести фиксов (2, 3, 4, 5) сами явно перечисляли
+оставшийся гэп в разделе «Осознанные ограничения» соответствующего ADR — и тот же пользователь
+независимо воспроизвёл именно эти гэпы новым репортом. Полные детали — `docs/DECISIONS.md` ADR-028;
+`docs/STATE.md` → «Fourth round» для таблицы root cause/fix. Кратко:
+
+1. **Артикул всё ещё мог склеить товары разных брендов, если у существующего товара ещё нет
+   `SupplierProductLink`** — проверка ADR-023 защищала только от привязки к ДРУГОМУ поставщику, но
+   ничего не проверяла для товара без привязки вообще (Dior совпал с никогда не привязанным Chanel).
+   **Исправлено (ADR-028):** обязательное подтверждение бренда (точное совпадение или алиас/
+   транслитерация через `BrandAliasResolver`) — отсутствие или несовпадение бренда теперь тоже
+   блокирует авто-матч.
+2. **Лимит кандидатов всё ещё пропускал конкретный товар в бренде с 300+ товарами** — «самое длинное
+   слово» оказывалось самим брендом (например, "chanel" среди 305 товаров Chanel), и результаты не
+   ранжировались перед обрезкой по лимиту. **Исправлено (ADR-028):** поиск по КАЖДОМУ значимому
+   токену (не только самому длинному), результаты ранжируются по накопленной релевантности перед
+   обрезкой до `candidateFetchLimit`.
+3. **У уже включённого `autoApply` источника можно было обнулить `senderAllowlist` без повторной
+   проверки** — гейт ADR-025 срабатывал только при переключении `autoApply` false→true, а не при
+   каждом изменении. **Исправлено (ADR-028):** постоянная проверка в `validateInvariants` — любое
+   результирующее состояние с `autoApply=true` и пустым `senderAllowlist` теперь отклоняется, вне
+   зависимости от того, что именно было изменено в запросе.
+4. **Платёжная защита всё ещё была неполной** — `confirm-payment` активировал подписку без оплаты
+   при отсутствующем секрете даже в production; `activate-stub`/`extend-trial` были ограничены до
+   `OWNER` — роли клиента платформы, а не оператора платформы. **Исправлено (ADR-028):** новый
+   `CloudPaymentsService#requiresWebhookConfirmation()` блокирует `confirm-payment` в `prod`-профиле
+   независимо от того, настроен ли секрет; `activate-stub`/`extend-trial` теперь требуют
+   `AuthorizationService#isSystemAdmin` (тот же `SYSTEM_ADMIN_EMAILS`-механизм, что и у
+   platform-wide endpoints в `AdminApiController`) вместо `MemberRole.OWNER`.
+
+Все четыре покрыты новым regression-тестом, точно воспроизводящим новый репорт. Build/test gate §1
+подтверждает отсутствие регрессий в остальном пайплайне после этих изменений (frontend не менялся
+в этом раунде).
+
 ## 3. Automation rate — как измерить перед приёмкой
 
 `docs/ARCHITECTURE.md` §15 называет **automation rate** главным продуктовым показателем: доля
@@ -235,28 +272,48 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
    §14.8) — один выборочный ручной прогон перед тем, как доверять этому по умолчанию для конкретного
    магазина.
 
-## 6. Известные ограничения (обновлено после раунда 3 — 6 bug fixes)
+## 6. Известные ограничения (обновлено после раунда 4 — closing round-3 gaps)
 
 Не переоткрывать/не пере-исследовать без нового измеренного повода — уже задокументированы, ссылки
-для контекста. **Оговорка после раунда 3**: несколько пунктов ниже, помеченных как "Resolved"
-вторым раундом, оказались резолвены не полностью — см. §2b и `docs/DECISIONS.md` ADR-022…027 для
-того, что именно было упущено и как исправлено сейчас. Формулировка "Resolved" в этом файле означает
-"нет известной открытой проблемы на момент этого ADR", а не гарантию отсутствия багов.
+для контекста. **Оговорка после раундов 3 и 4**: несколько пунктов ниже, помеченных как "Resolved"
+предыдущим раундом, оказались резолвены не полностью — см. §2b/§2c и `docs/DECISIONS.md`
+ADR-022…028 для того, что именно было упущено и как исправлено сейчас. Формулировка "Resolved" в
+этом файле означает "нет известной открытой проблемы на момент этого ADR", а не гарантию отсутствия
+багов — доказано дважды подряд в этом же проекте.
+
+**Закрыто раундом 4** (2026-09-10, не открывать заново без нового измеренного повода):
+
+- ~~Артикул мог склеить товары разных брендов, если у существующего товара ещё нет
+  `SupplierProductLink`~~ — **Resolved (ADR-028):** обязательное подтверждение бренда
+  (`brandsConfirmIdentity`) — дополнительный, независимый от привязки-к-другому-поставщику гейт.
+- ~~Лимит кандидатов пропускал конкретный товар в бренде с 300+ товарами, если самое длинное слово
+  оказывалось самим брендом~~ — **Resolved (ADR-028):** поиск по всем значимым токенам +
+  ранжирование по релевантности перед обрезкой лимита.
+- ~~У уже включённого `autoApply` источника можно было обнулить `senderAllowlist` без повторной
+  проверки~~ — **Resolved (ADR-028):** постоянная проверка в `validateInvariants` на каждый PATCH,
+  не только на переключение `autoApply`.
+- ~~`confirm-payment` активировал подписку без оплаты при отсутствующем секрете даже в production;
+  `activate-stub`/`extend-trial` доступны обычному `OWNER`~~ — **Resolved (ADR-028):**
+  `requiresWebhookConfirmation()` fail-closed в `prod`; `activate-stub`/`extend-trial` теперь требуют
+  `AuthorizationService#isSystemAdmin`, а не `MemberRole.OWNER`.
 
 **Закрыто раундом 3** (2026-09-10, не открывать заново без нового измеренного повода):
 
 - ~~FULL-импорт мог скрыть товар, чья строка стала `INVALID`~~ — **Resolved (ADR-022):** raw-identity
   cross-check по всем строкам batch перед деактивацией, независимо от статуса строки.
-- ~~Точное сопоставление по артикулу не учитывало поставщика~~ — **Resolved (ADR-023):** проверка
-  существующего `SupplierProductLink` на другого поставщика перед авто-матчем.
+- ~~Точное сопоставление по артикулу не учитывало поставщика~~ — **Resolved (ADR-023, дополнено
+  ADR-028):** проверка существующего `SupplierProductLink` на другого поставщика + обязательное
+  подтверждение бренда — перед авто-матчем.
 - ~~Лимит 300 кандидатов блокировал поиск по имени для брендов с 300+ товарами~~ — **Resolved
-  (ADR-024):** комбинированный brand+name запрос + безусловный запуск name-widening запроса.
+  (ADR-024, дополнено ADR-028):** комбинированный brand+name запрос по каждому значимому токену +
+  ранжирование по релевантности.
 - ~~PATCH мог включить `autoApply` в обход проверок `/graduate`; пустой allowlist разрешён~~ —
-  **Resolved (ADR-025):** общий `assertReadyForAutoApply` gate для обоих endpoint'ов + проверка
-  непустого `senderAllowlist`.
+  **Resolved (ADR-025, дополнено ADR-028):** общий `assertReadyForAutoApply` gate для обоих
+  endpoint'ов + постоянная проверка непустого `senderAllowlist` на каждый PATCH.
 - ~~CloudPayments HMAC пропускал проверку при отсутствии секрета безусловно; billing bypass
-  endpoints доступны любому участнику~~ — **Resolved (ADR-026):** fail-closed в `prod` профиле;
-  `OWNER`-only для `activate-stub`/`extend-trial`.
+  endpoints доступны любому участнику~~ — **Resolved (ADR-026, дополнено ADR-028):** fail-closed в
+  `prod` профиле для HMAC И для `confirm-payment`; `isSystemAdmin`-only (не `OWNER`) для
+  `activate-stub`/`extend-trial`.
 - ~~CI указывал `main`, реальная ветка `master`; `npm audit` не блокировал~~ — **Resolved
   (ADR-027):** `push.branches: [master]`; blocking `--audit-level=critical` gate.
 
@@ -311,6 +368,10 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
 - [ ] §2b — прочитан список из шести раунд-3 багов (ADR-022…027); ответственный оператор понимает,
       что "Resolved" во втором раунде для этих же областей оказалось неполным, и относится к текущим
       "Resolved" пометкам как к «нет известной проблемы сейчас», а не как к гарантии.
+- [ ] §2c — прочитан список из четырёх раунд-4 гэпов (ADR-028); это уже ВТОРОЙ раз, когда "Resolved"
+      для тех же четырёх областей (article matching, candidate search, autoApply gate, billing)
+      оказалось неполным — ответственный оператор относится к текущему состоянию соответственно
+      осторожно, а не как к окончательно закрытому вопросу.
 - [ ] §3 — automation rate измерен и явно принят для этого поставщика.
 - [ ] §4 — shadow-mode acceptance пройден по всем пяти пунктам перед `autoApply=true`.
 - [ ] §5 — FULL snapshot чеклист пройден перед первым реальным FULL apply для этого источника.

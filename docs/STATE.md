@@ -83,6 +83,25 @@ this sandbox); `npm run lint` — 0 errors (4 pre-existing warnings, unrelated f
 (`ImportBatchApplyServiceTest`, `LargeCatalogMatchingTest`, `SupplierSourceAdminServiceTest` [new],
 `CloudPaymentsServiceTest`, `BillingControllerTest`) — new migration `V29`.
 
+## Fourth round: closing the acknowledged gaps in bugs 2/3/4/5 (2026-09-10)
+
+Round 3's fixes for bugs 2, 3, 4 and 5 were each real but incomplete — every gap below was already
+named as an explicit "Осознанные ограничения" entry in ADR-023/024/025/026 and was independently
+reproduced by the user with a concrete repro. Full detail — `docs/DECISIONS.md` ADR-028.
+
+| # | Bug (as reported) | Root cause | Fix |
+| --- | --- | --- | --- |
+| 2 (follow-up) | Article match still merges Dior into Chanel as `EXACT` when the Chanel product has NO `SupplierProductLink` at all yet | `resolveViaExactSupplierArticle` only rejected the match against a candidate linked to a *different* supplier — a never-linked candidate had nothing to compare against | Added a required brand-identity check (`brandsConfirmIdentity`, exact/alias/transliteration match via `BrandAliasResolver`) — a missing or mismatched brand on either side now also rejects the match |
+| 3 (follow-up) | 305 Chanel products + a specific "Chanel No 5 100 ml" still excluded from candidates | "Longest token" picked "chanel" itself (the brand, shared by all 305 products) as the sole name signal, so the combined query was no more selective than brand-only, and results were never ranked before truncation | `SimpleProductCandidateFetcher` now queries per SIGNIFICANT token (not just the longest one — numeric tokens like a volume kept at any length) and ranks the merged candidate pool by accumulated relevance score before truncating to `candidateFetchLimit` |
+| 4 (follow-up) | A working, already-`autoApply=true` source can have its `senderAllowlist` blanked via PATCH without re-triggering any check | `assertReadyForAutoApply`'s `senderAllowlist` check only ran on the `false`→`true` autoApply transition | `validateInvariants` (runs on every `updateSource` call) now permanently rejects any resulting state with `autoApply=true` and a blank `senderAllowlist`, regardless of which field triggered the change |
+| 5 (follow-up) | `confirm-payment` still self-activates without payment when no CloudPayments secret is configured, even in production; `activate-stub` still reachable by an ordinary shop `OWNER` (a platform customer, not an operator) even with the gateway configured | `confirm-payment` used `isLiveGatewayConfigured()` alone; `activate-stub`/`extend-trial` used shop-scoped `MemberRole.OWNER` | New `CloudPaymentsService#requiresWebhookConfirmation()` (`isLiveGatewayConfigured() \|\| isProdProfile()`) gates `confirm-payment`; new shared `AuthorizationService#isSystemAdmin` (moved out of `AdminApiController`) now gates `activate-stub`/`extend-trial` instead of `MemberRole.OWNER` |
+
+Verified after Round 4: `./mvnw -o test` — 347 tests run, 346 green, 1 error (same pre-existing
+`FlywayPostgresSchemaTest` Docker-daemon requirement, unaffected by this round). No frontend files
+changed this round, so the frontend build/lint/test results from Round 3 stand unchanged.
+New/updated test files: `LargeCatalogMatchingTest`, `SupplierSourceAdminServiceTest`,
+`CloudPaymentsServiceTest`, `BillingControllerTest`.
+
 ## Verified facts from repository
 
 - Backend: Spring Boot `3.1.5`, Java release `21`; audit runtime —

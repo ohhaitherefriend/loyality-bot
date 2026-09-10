@@ -49,6 +49,19 @@ public class CloudPaymentsService {
     }
 
     /**
+     * True when {@code confirm-payment} must reject client-triggered self-activation: either a
+     * live gateway is actually configured (the HMAC-validated webhook is the only trustworthy
+     * source of truth), or the app is running the {@code prod} profile without one configured at
+     * all. The latter case matters because a missing secret in production can only be a
+     * misconfiguration, not the legitimate dev/stub signal it is everywhere else (ADR-020) — an
+     * operator who forgets to set {@code CLOUDPAYMENTS_API_SECRET} in production must never get
+     * "unpaid subscriptions activate for free" as the fallback behavior (ADR-028).
+     */
+    public boolean requiresWebhookConfirmation() {
+        return isLiveGatewayConfigured() || isProdProfile();
+    }
+
+    /**
      * True when running under the {@code prod} Spring profile - same
      * {@code environment.getActiveProfiles()} check {@code SecurityConfig} already uses to decide
      * production-only behavior. A missing API secret is a legitimate "no live gateway configured

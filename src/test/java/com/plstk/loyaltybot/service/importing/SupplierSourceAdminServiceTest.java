@@ -96,6 +96,13 @@ class SupplierSourceAdminServiceTest {
                 null, null, null, null, false, true, confirmAutoApply, null, null, null, null);
     }
 
+    /** A PATCH that touches ONLY senderAllowlist - every other field (including autoApply/shadowMode) is left as-is. */
+    private UpdateSupplierSourceRequest patchSenderAllowlist(String senderAllowlist) {
+        return new UpdateSupplierSourceRequest(
+                null, null, null, null, senderAllowlist, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null, null);
+    }
+
     @Test
     void patch_autoApplyOn_withoutAnySuccessfulShadowBatch_isRejected_sameGateAsGraduate() {
         SupplierSource source = saveSource("supplier.ru", true);
@@ -193,6 +200,44 @@ class SupplierSourceAdminServiceTest {
 
         assertFalse(updated.getShadowMode());
         assertTrue(updated.getAutoApply());
+    }
+
+    /**
+     * Follow-up to the six-bug hardening pass: {@code assertReadyForAutoApply} only runs on the
+     * transition INTO {@code autoApply=true} - a PATCH that leaves an already-live source's {@code
+     * autoApply} untouched while blanking {@code senderAllowlist} in the same request used to sail
+     * through unchecked (reproduced by the report). After this PATCH the source would keep
+     * auto-applying attachments unattended while now accepting mail from ANY sender.
+     */
+    @Test
+    void patch_blankingSenderAllowlist_whileAutoApplyAlreadyOn_isRejected() {
+        SupplierSource source = saveSource("supplier.ru", true);
+        saveSuccessfulShadowBatch(source);
+        service.graduate(SHOP_ID, source.getId(), true);
+
+        SupplierSourceValidationException ex = assertThrows(SupplierSourceValidationException.class,
+                () -> service.updateSource(SHOP_ID, source.getId(), patchSenderAllowlist("")));
+
+        assertTrue(ex.getFieldErrors().containsKey("senderAllowlist"),
+                "blanking the sender allowlist while autoApply stays on must be rejected - the "
+                        + "source would keep auto-applying attachments from ANY sender");
+    }
+
+    /** A PATCH unrelated to senderAllowlist/autoApply must still succeed on an already-live source. */
+    @Test
+    void patch_unrelatedField_onAlreadyLiveSource_stillSucceeds() {
+        SupplierSource source = saveSource("supplier.ru", true);
+        saveSuccessfulShadowBatch(source);
+        service.graduate(SHOP_ID, source.getId(), true);
+
+        UpdateSupplierSourceRequest patchLabel = new UpdateSupplierSourceRequest(
+                null, "renamed-label", null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null, null);
+
+        SupplierSource updated = service.updateSource(SHOP_ID, source.getId(), patchLabel);
+
+        assertTrue(updated.getAutoApply());
+        assertTrue("renamed-label".equals(updated.getLabel()));
     }
 
     @TestConfiguration

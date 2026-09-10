@@ -692,9 +692,12 @@ class SupplierImportEndToEndTest {
                 ProductRepository productRepository,
                 RowAttributeNormalizer normalizer,
                 CriticalAttributeConflictChecker conflictChecker,
-                CandidateSearchService candidateSearchService) {
+                CandidateSearchService candidateSearchService,
+                BrandNormalizer brandNormalizer,
+                BrandAliasResolver brandAliasResolver) {
             return new DeterministicMatchResolver(
-                    supplierProductLinkRepository, productRepository, normalizer, conflictChecker, candidateSearchService);
+                    supplierProductLinkRepository, productRepository, normalizer, conflictChecker,
+                    candidateSearchService, brandNormalizer, brandAliasResolver);
         }
 
         @Bean

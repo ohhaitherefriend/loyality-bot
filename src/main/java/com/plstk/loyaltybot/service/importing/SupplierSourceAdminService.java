@@ -281,7 +281,18 @@ public class SupplierSourceAdminService {
                         "autoApply", "cannot be enabled together with shadowMode - graduate the source first")
                 .rejectIf(autoApplyTurningOn && !Boolean.TRUE.equals(confirmAutoApply),
                         "confirmAutoApply", "must be true to explicitly enable autoApply "
-                                + "(a FULL snapshot can hide products that disappear from the file)");
+                                + "(a FULL snapshot can hide products that disappear from the file)")
+                // ADR-028: assertReadyForAutoApply only runs on the transition into autoApply=true,
+                // so a PATCH that leaves autoApply already true untouched while blanking
+                // senderAllowlist in the same request used to sail through unchecked - the source
+                // kept applying attachments unattended while now accepting mail from ANY sender
+                // (SupplierSourceMatcher's documented permissive-when-blank behavior). This runs on
+                // EVERY update, not just the on-transition, so the invariant holds continuously for
+                // as long as autoApply stays enabled, not merely at the moment it was turned on.
+                .rejectIf(Boolean.TRUE.equals(source.getAutoApply())
+                                && (source.getSenderAllowlist() == null || source.getSenderAllowlist().isBlank()),
+                        "senderAllowlist", "cannot be blank while autoApply is enabled - disable autoApply "
+                                + "first, or set a non-empty allowlist in the same request");
         errors.throwIfInvalid();
     }
 
