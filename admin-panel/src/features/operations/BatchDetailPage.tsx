@@ -222,6 +222,16 @@ export function BatchDetailPage() {
             <InfoRow label="Изм. цена" value={batch.offersPriceChangedCount ?? '—'} />
             <InfoRow label="Снято с продажи" value={batch.productsRemovedFromStorefrontCount ?? '—'} />
             <InfoRow label="Возвращено" value={batch.productsReactivatedCount ?? '—'} />
+            {!!batch.offersProtectedFromDeactivationCount && (
+              <InfoRow
+                label="Защищено от скрытия (ошибка строки)"
+                value={
+                  <span className="text-amber-600 font-medium">
+                    {batch.offersProtectedFromDeactivationCount}
+                  </span>
+                }
+              />
+            )}
             <InfoRow label="Применена" value={batch.appliedAt ? formatDateTime(batch.appliedAt) : '—'} />
           </CardContent>
         </Card>

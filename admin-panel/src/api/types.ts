@@ -881,6 +881,7 @@ export interface BatchDetailResponse {
   offersUnchangedCount?: number
   productsRemovedFromStorefrontCount?: number
   productsReactivatedCount?: number
+  offersProtectedFromDeactivationCount?: number
   startedAt?: string
   finishedAt?: string
   appliedAt?: string

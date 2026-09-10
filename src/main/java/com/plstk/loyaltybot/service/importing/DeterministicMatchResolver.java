@@ -64,7 +64,7 @@ public class DeterministicMatchResolver {
             return barcodeMatch.get();
         }
 
-        Optional<MatchResolution> articleMatch = resolveViaExactSupplierArticle(shopId, row);
+        Optional<MatchResolution> articleMatch = resolveViaExactSupplierArticle(shopId, supplierId, row);
         if (articleMatch.isPresent()) {
             return articleMatch.get();
         }
@@ -139,8 +139,19 @@ public class DeterministicMatchResolver {
      * within the shop AND clear of critical attribute conflicts (volume/concentration/shade/
      * tester/set) against the row - a coincidental article-number collision with a completely
      * different product is rejected instead of silently trusted.
+     *
+     * <p>Unlike barcode (a universal real-world product identifier that different suppliers
+     * legitimately share for the same physical item), a supplier article/SKU is that supplier's
+     * own internal numbering - two different suppliers' internal catalogues coincidentally using
+     * the same article string for two completely unrelated products is common, not a signal of
+     * the same product. {@code Product.supplierArticle} is a single denormalized column (whichever
+     * supplier most recently wrote it), so a bare {@code shopId + supplierArticle} lookup is
+     * effectively unscoped by supplier. If this candidate product is already linked (via
+     * {@link SupplierProductLink}) to a <em>different</em> supplier, that coincidental match is
+     * rejected instead of silently substituting one supplier's price/stock onto another supplier's
+     * product (see docs/DECISIONS.md ADR-023).
      */
-    private Optional<MatchResolution> resolveViaExactSupplierArticle(String shopId, NormalizedRowData row) {
+    private Optional<MatchResolution> resolveViaExactSupplierArticle(String shopId, Long supplierId, NormalizedRowData row) {
         if (row.externalSku() == null || row.externalSku().isBlank()) {
             return Optional.empty();
         }
@@ -149,6 +160,9 @@ public class DeterministicMatchResolver {
             return Optional.empty();
         }
         Product candidate = matches.get(0);
+        if (supplierProductLinkRepository.existsByShopIdAndProductIdAndSupplierIdNot(shopId, candidate.getId(), supplierId)) {
+            return Optional.empty();
+        }
         NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
         List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
         if (!conflicts.isEmpty()) {

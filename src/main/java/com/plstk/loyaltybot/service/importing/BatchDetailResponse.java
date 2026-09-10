@@ -37,6 +37,7 @@ public record BatchDetailResponse(
         Integer offersUnchangedCount,
         Integer productsRemovedFromStorefrontCount,
         Integer productsReactivatedCount,
+        Integer offersProtectedFromDeactivationCount,
         LocalDateTime startedAt,
         LocalDateTime finishedAt,
         LocalDateTime appliedAt,

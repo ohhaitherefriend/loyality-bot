@@ -63,12 +63,26 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
     private List<Product> search(String shopId, Set<String> brandTokens, String nameToken, int limit) {
         Map<Long, Product> byId = new LinkedHashMap<>();
 
+        if (!brandTokens.isEmpty() && nameToken != null) {
+            // Most targeted signal first, inserted before the wider brand-only query below: when a
+            // single brand has more than `limit` products, this narrows within that brand by name
+            // too, so the specific item this row's name matches is found (and survives the final
+            // truncation) even if it would have fallen outside the brand-only query's page window.
+            for (Product p : productRepository.findByShopIdAndBrandTokenInAndNameToken(
+                    shopId, brandTokens, nameToken, PageRequest.of(0, limit))) {
+                byId.putIfAbsent(p.getId(), p);
+            }
+        }
         if (!brandTokens.isEmpty()) {
             for (Product p : productRepository.findByShopIdAndBrandTokenIn(shopId, brandTokens, PageRequest.of(0, limit))) {
                 byId.putIfAbsent(p.getId(), p);
             }
         }
-        if (byId.size() < limit && nameToken != null) {
+        if (nameToken != null) {
+            // Deliberately NOT gated on `byId.size() < limit` (Stage 4 gap, docs/DECISIONS.md
+            // ADR-024): a brand with more products than `limit` fills the brand-only step above on
+            // its own, which used to skip this name-based widening entirely and permanently hide any
+            // candidate the brand-only query's page window happened to cut off.
             for (Product p : productRepository.findByShopIdAndNameContainingIgnoreCase(
                     shopId, nameToken, PageRequest.of(0, limit))) {
                 byId.putIfAbsent(p.getId(), p);
@@ -86,6 +100,9 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
                 byId.putIfAbsent(p.getId(), p);
             }
         }
+        // Content-matched candidates (brand+name, brand-only, name-only) were inserted before the
+        // id-ordered backfill, so truncating to `limit` here never drops a content match in favor
+        // of an arbitrary id-ordered one, even when the combined pool exceeds `limit`.
         return new LinkedHashSet<>(byId.values()).stream().limit(limit).toList();
     }
 

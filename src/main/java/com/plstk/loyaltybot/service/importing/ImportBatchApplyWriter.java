@@ -171,15 +171,32 @@ public class ImportBatchApplyWriter {
             importRowRepository.save(row);
         }
 
+        int protectedFromDeactivation = 0;
         if (source.getSnapshotMode() == SnapshotMode.FULL) {
             List<SupplierOffer> stale = supplierOfferRepository.findStaleActiveOffersInScope(
                     shopId, supplier.getId(), source.getSnapshotScope(), batchId);
+            Set<String> identifiersPresentInBatch = collectIdentifiersPresentInBatch(batchId);
             LocalDateTime now = LocalDateTime.now();
             for (SupplierOffer offer : stale) {
+                if (isReferencedByIdentifier(offer, identifiersPresentInBatch)) {
+                    // The row that should have refreshed this offer exists in this FULL file but
+                    // failed processing (e.g. INVALID price) rather than the product genuinely
+                    // being absent from the supplier's snapshot - do NOT deactivate/hide it from
+                    // the storefront on the strength of a row-level processing error. The offer
+                    // keeps its last known-good price/stock until a row for this identifier
+                    // applies successfully. See docs/DECISIONS.md ADR-022.
+                    protectedFromDeactivation++;
+                    continue;
+                }
                 offer.setActive(false);
                 offer.setDeactivatedAt(now);
                 supplierOfferRepository.save(offer);
                 touchedProductIds.add(offer.getProduct().getId());
+            }
+            if (protectedFromDeactivation > 0) {
+                log.warn("Batch {} FULL snapshot: {} offer(s) matched by externalSku/barcode to a row present "
+                                + "in this file that did not apply successfully - protected from stale deactivation",
+                        batchId, protectedFromDeactivation);
             }
         }
 
@@ -207,6 +224,7 @@ public class ImportBatchApplyWriter {
         batch.setOffersUnchangedCount(unchanged);
         batch.setProductsRemovedFromStorefrontCount(removedFromStorefront);
         batch.setProductsReactivatedCount(reactivated);
+        batch.setOffersProtectedFromDeactivationCount(protectedFromDeactivation);
         importBatchRepository.save(batch);
         log.info("Batch {} applied: {} row(s), {} added, {} updated ({} price-changed), {} deactivated-scope-removed, "
                         + "{} reactivated -> APPLIED",
@@ -317,6 +335,35 @@ public class ImportBatchApplyWriter {
         }
         link.setConfirmedAt(LocalDateTime.now());
         supplierProductLinkRepository.save(link);
+    }
+
+    /**
+     * Every row's raw cell values are persisted at parse time regardless of the row's final status
+     * (see {@code ImportBatchParseWriter#finalizeSuccess} / {@code SpreadsheetParser}) - an
+     * {@code INVALID} row (e.g. bad price) still carries its raw {@code externalSku}/{@code barcode}
+     * if the file had one. This scans every row of the batch, not just the appliable ones, so a
+     * product that genuinely appears in the file but whose row failed processing is not confused
+     * with a product that is truly absent from a FULL snapshot.
+     */
+    private Set<String> collectIdentifiersPresentInBatch(Long batchId) {
+        Set<String> identifiers = new LinkedHashSet<>();
+        for (ImportRow row : importRowRepository.findByImportBatchId(batchId)) {
+            Map<String, String> raw = readRaw(row);
+            String externalSku = raw.get(LayoutRuleDefinition.FIELD_EXTERNAL_SKU);
+            String barcode = raw.get(LayoutRuleDefinition.FIELD_BARCODE);
+            if (externalSku != null && !externalSku.isBlank()) {
+                identifiers.add(externalSku);
+            }
+            if (barcode != null && !barcode.isBlank()) {
+                identifiers.add(barcode);
+            }
+        }
+        return identifiers;
+    }
+
+    private boolean isReferencedByIdentifier(SupplierOffer offer, Set<String> identifiersPresentInBatch) {
+        return (offer.getExternalSku() != null && identifiersPresentInBatch.contains(offer.getExternalSku()))
+                || (offer.getBarcode() != null && identifiersPresentInBatch.contains(offer.getBarcode()));
     }
 
     private NormalizedRowData readNormalized(ImportRow row) {

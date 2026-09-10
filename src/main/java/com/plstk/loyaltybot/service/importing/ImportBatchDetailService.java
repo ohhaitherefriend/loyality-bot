@@ -90,6 +90,7 @@ public class ImportBatchDetailService {
                 batch.getOffersUnchangedCount(),
                 batch.getProductsRemovedFromStorefrontCount(),
                 batch.getProductsReactivatedCount(),
+                batch.getOffersProtectedFromDeactivationCount(),
                 batch.getStartedAt(),
                 batch.getFinishedAt(),
                 batch.getAppliedAt(),

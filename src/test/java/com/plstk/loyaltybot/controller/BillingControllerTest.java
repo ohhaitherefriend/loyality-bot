@@ -9,11 +9,13 @@ import com.plstk.loyaltybot.repository.SubscriptionRepository;
 import com.plstk.loyaltybot.service.AuthorizationService;
 import com.plstk.loyaltybot.service.CloudPaymentsService;
 import com.plstk.loyaltybot.service.SubscriptionService;
+import com.plstk.loyaltybot.entity.ShopMember;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import javax.crypto.Mac;
@@ -52,7 +54,8 @@ class BillingControllerTest {
 
     private BillingController controllerWithSecret(String apiSecret) {
         SubscriptionService subscriptionService = new SubscriptionService(subscriptionRepository, planRepository);
-        CloudPaymentsService cloudPaymentsService = new CloudPaymentsService(subscriptionService, planRepository);
+        CloudPaymentsService cloudPaymentsService =
+                new CloudPaymentsService(subscriptionService, planRepository, new MockEnvironment());
         ReflectionTestUtils.setField(cloudPaymentsService, "apiSecret", apiSecret);
         ReflectionTestUtils.setField(cloudPaymentsService, "publicId", "pk_test");
         AuthorizationService authorizationService = new AuthorizationService(shopRepository, shopMemberRepository);
@@ -139,5 +142,59 @@ class BillingControllerTest {
 
         assertEquals(400, response.getStatusCode().value());
         verify(subscriptionRepository).findByShopId("shop-1");
+    }
+
+    /**
+     * Six-bug hardening pass (ADR-026): {@code activate-stub}/{@code extend-trial} grant billing
+     * state without any real payment, so an ordinary {@code STAFF}/{@code ADMIN} shop member must
+     * never be able to call them - only the shop owner can.
+     */
+    @Test
+    void activateStub_asOrdinaryStaffMember_isForbidden() {
+        BillingController controller = controllerWithSecret("");
+        AdminUser staff = AdminUser.builder().id(2L).email("staff@example.com").build();
+        lenient().when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+        lenient().when(shopMemberRepository.findByUserIdAndShopId(2L, "shop-1"))
+                .thenReturn(Optional.of(ShopMember.builder()
+                        .userId(2L).shopId("shop-1").role(ShopMember.MemberRole.STAFF).build()));
+
+        var response = controller.activateStub("shop-1", "BASIC_MONTHLY", staff);
+
+        assertEquals(403, response.getStatusCode().value());
+        verify(subscriptionRepository, never()).findByShopId("shop-1");
+    }
+
+    @Test
+    void activateStub_asOwner_succeeds() {
+        BillingController controller = controllerWithSecret("");
+        AdminUser owner = AdminUser.builder().id(1L).email("owner@example.com").build();
+        com.plstk.loyaltybot.entity.Subscription existing =
+                com.plstk.loyaltybot.entity.Subscription.builder().id(1L).shopId("shop-1").build();
+        when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+        when(subscriptionRepository.findByShopId("shop-1")).thenReturn(Optional.of(existing));
+        when(subscriptionRepository.save(existing)).thenReturn(existing);
+        when(planRepository.findByCode("BASIC_MONTHLY")).thenReturn(Optional.empty());
+
+        var response = controller.activateStub("shop-1", "BASIC_MONTHLY", owner);
+
+        assertEquals(200, response.getStatusCode().value());
+    }
+
+    @Test
+    void extendTrial_asOrdinaryAdminMember_isForbidden() {
+        BillingController controller = controllerWithSecret("");
+        AdminUser admin = AdminUser.builder().id(2L).email("admin@example.com").build();
+        lenient().when(shopRepository.findByShopId("shop-1"))
+                .thenReturn(Optional.of(Shop.builder().id(1L).shopId("shop-1").ownerId(1L).build()));
+        lenient().when(shopMemberRepository.findByUserIdAndShopId(2L, "shop-1"))
+                .thenReturn(Optional.of(ShopMember.builder()
+                        .userId(2L).shopId("shop-1").role(ShopMember.MemberRole.ADMIN).build()));
+
+        var response = controller.extendTrial("shop-1", 7, admin);
+
+        assertEquals(403, response.getStatusCode().value());
+        verify(subscriptionRepository, never()).findByShopId("shop-1");
     }
 }

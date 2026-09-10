@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import javax.crypto.Mac;
@@ -33,8 +34,12 @@ class CloudPaymentsServiceTest {
     private static final String SECRET = "super-secret-cloudpayments-key";
 
     private CloudPaymentsService serviceWithSecret(String secret) {
+        return serviceWithSecret(secret, new MockEnvironment());
+    }
+
+    private CloudPaymentsService serviceWithSecret(String secret, MockEnvironment environment) {
         SubscriptionService subscriptionService = new SubscriptionService(subscriptionRepository, planRepository);
-        CloudPaymentsService service = new CloudPaymentsService(subscriptionService, planRepository);
+        CloudPaymentsService service = new CloudPaymentsService(subscriptionService, planRepository, environment);
         ReflectionTestUtils.setField(service, "apiSecret", secret);
         return service;
     }
@@ -79,5 +84,29 @@ class CloudPaymentsServiceTest {
         assertFalse(serviceWithSecret("").isLiveGatewayConfigured());
         assertFalse(serviceWithSecret(null).isLiveGatewayConfigured());
         assertTrue(serviceWithSecret(SECRET).isLiveGatewayConfigured());
+    }
+
+    /**
+     * Six-bug hardening pass (ADR-026): a missing secret is a legitimate dev/stub signal outside of
+     * prod, but in the {@code prod} profile it can only be a misconfiguration - the webhook must be
+     * rejected (fail closed), never silently accepted.
+     */
+    @Test
+    void validateHmac_noSecretConfiguredInProdProfile_rejectsInsteadOfSkipping() {
+        MockEnvironment prod = new MockEnvironment();
+        prod.addActiveProfile("prod");
+        CloudPaymentsService service = serviceWithSecret("", prod);
+
+        assertFalse(service.validateHmac("any body", null));
+        assertFalse(service.validateHmac("any body", "irrelevant"));
+    }
+
+    @Test
+    void validateHmac_noSecretConfiguredOutsideProdProfile_stillSkipsValidation() {
+        MockEnvironment dev = new MockEnvironment();
+        dev.addActiveProfile("dev");
+        CloudPaymentsService service = serviceWithSecret("", dev);
+
+        assertTrue(service.validateHmac("any body", null));
     }
 }

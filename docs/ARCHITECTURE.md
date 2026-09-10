@@ -470,7 +470,7 @@ POST   /api/shops/{shopId}/imports/manual-upload
 4. Зафиксировать rule version, AI prompt/model versions и decisions.
 5. Для каждой строки создать/обновить `supplier_offer`, записать `supplierPrice`, применённый `commissionPercent`, рассчитанный `sitePrice`, stock и `lastSeenBatchId`.
 6. Создать безопасно распознанные `NEW_PRODUCT`; сомнительные оставить исключением.
-7. Для `FULL` snapshot после успешной обработки деактивировать offers в том же supplier/source scope, у которых `lastSeenBatchId != currentBatchId`.
+7. Для `FULL` snapshot после успешной обработки деактивировать offers в том же supplier/source scope, у которых `lastSeenBatchId != currentBatchId` — **за исключением** offer'ов, чей `externalSku`/`barcode` всё же присутствует где-то в сырых данных batch'а (даже если конкретная строка не дошла до `APPLIED`, например стала `INVALID` из-за некорректной цены); такие offers защищаются от деактивации вместо того, чтобы неотличимо считаться отсутствующими в файле (ADR-022).
 8. Пересчитать каталог: если есть активные offers, товар показывается и получает публичную цену по стратегии источника/магазина; если offers нет, товар исчезает со storefront. `manual_hidden=true` всегда имеет приоритет.
 9. Для нескольких активных offers одного товара default-стратегия выбирает минимальный рассчитанный `sitePrice`; закупочные цены остаются внутренними.
 10. Для delta-файла отсутствие строки ничего не означает. Для partial snapshot reconciliation ограничивается настроенным scope.

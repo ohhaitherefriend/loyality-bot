@@ -174,6 +174,11 @@ public class SupplierSourceAdminService {
         }
 
         validateInvariants(source, autoApplyTurningOn, request.confirmAutoApply());
+        // ADR-025: a plain PATCH must never be able to grant autoApply on an easier path than
+        // /graduate - both go through the exact same shadow-run/open-batch/sender-allowlist gate.
+        if (autoApplyTurningOn) {
+            assertReadyForAutoApply(shopId, sourceId, source);
+        }
 
         return saveWithOptimisticLockTranslation(source);
     }
@@ -199,6 +204,21 @@ public class SupplierSourceAdminService {
         SupplierSource source = supplierSourceRepository.findByShopIdAndId(shopId, sourceId)
                 .orElseThrow(() -> new IllegalArgumentException("Supplier source " + sourceId + " not found for shop " + shopId));
 
+        assertReadyForAutoApply(shopId, sourceId, source);
+
+        source.setShadowMode(false);
+        source.setAutoApply(true);
+        // enabled is intentionally left untouched: graduation is about apply policy, not routing.
+        return saveWithOptimisticLockTranslation(source);
+    }
+
+    /**
+     * The single gate for turning {@code autoApply} on, shared by both {@link #graduate} and a
+     * plain {@link #updateSource} PATCH that flips {@code autoApply} itself (ADR-025) - there must
+     * be exactly one path with exactly one set of checks, not a stricter one guarding {@code
+     * /graduate} and a looser one reachable via PATCH.
+     */
+    private void assertReadyForAutoApply(String shopId, Long sourceId, SupplierSource source) {
         long successfulShadowBatches = importBatchRepository.countByShopIdAndSupplierSourceIdAndStatusIn(
                 shopId, sourceId, GRADUATE_SUCCESSFUL_STATUSES);
         long openBlockingBatches = importBatchRepository.countByShopIdAndSupplierSourceIdAndStatusIn(
@@ -215,13 +235,15 @@ public class SupplierSourceAdminService {
                                 + "resolved (resumed/investigated) before graduating")
                 .rejectIf(unresolvedNeedsReview > 0, "rows",
                         "There are " + unresolvedNeedsReview + " row(s) still in NEEDS_REVIEW for this source "
-                                + "that require an operator decision before graduating");
+                                + "that require an operator decision before graduating")
+                // An empty allowlist means SupplierSourceMatcher accepts mail from ANY sender
+                // (see its own javadoc) - tolerable for a shadow/manually-reviewed source, but never
+                // for one that will auto-apply unattended. Reproduced by the six-bug report.
+                .rejectIf(source.getSenderAllowlist() == null || source.getSenderAllowlist().isBlank(),
+                        "senderAllowlist",
+                        "must be set before autoApply can be enabled - an empty allowlist accepts mail "
+                                + "from any sender, so autoApply would apply unverified attachments unattended");
         errors.throwIfInvalid();
-
-        source.setShadowMode(false);
-        source.setAutoApply(true);
-        // enabled is intentionally left untouched: graduation is about apply policy, not routing.
-        return saveWithOptimisticLockTranslation(source);
     }
 
     private SupplierSource saveWithOptimisticLockTranslation(SupplierSource source) {

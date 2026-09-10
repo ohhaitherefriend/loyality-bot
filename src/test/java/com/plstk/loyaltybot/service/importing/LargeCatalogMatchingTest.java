@@ -3,9 +3,13 @@ package com.plstk.loyaltybot.service.importing;
 import com.plstk.loyaltybot.config.SupplierImportProperties;
 import com.plstk.loyaltybot.entity.commerce.Product;
 import com.plstk.loyaltybot.entity.importing.BrandAlias;
+import com.plstk.loyaltybot.entity.importing.LinkConfirmationSource;
+import com.plstk.loyaltybot.entity.importing.Supplier;
+import com.plstk.loyaltybot.entity.importing.SupplierProductLink;
 import com.plstk.loyaltybot.repository.BrandAliasRepository;
 import com.plstk.loyaltybot.repository.ProductRepository;
 import com.plstk.loyaltybot.repository.SupplierProductLinkRepository;
+import com.plstk.loyaltybot.repository.SupplierRepository;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -17,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -38,6 +43,8 @@ class LargeCatalogMatchingTest {
     private BrandAliasRepository brandAliasRepository;
     @Autowired
     private SupplierProductLinkRepository supplierProductLinkRepository;
+    @Autowired
+    private SupplierRepository supplierRepository;
     @Autowired
     private EntityManager entityManager;
 
@@ -148,5 +155,67 @@ class LargeCatalogMatchingTest {
         return normalizer.normalize(Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, brand,
                 LayoutRuleDefinition.FIELD_RAW_NAME, name));
+    }
+
+    /**
+     * Six-bug hardening pass regression: a single brand with MORE products than {@code
+     * candidate-fetch-limit} (300) used to make {@code SimpleProductCandidateFetcher} skip its
+     * name-based search step entirely, since the brand-only query alone already filled the limit -
+     * permanently hiding any candidate the brand-only query's own page window happened to cut off
+     * (reproduced by the report as "item #301 never becomes a candidate").
+     */
+    @Test
+    void brandWithMoreThan300Items_stillSurfacesLateItemByName_viaCombinedBrandAndNameSearch() {
+        String megaBrand = "MegaBrand";
+        List<Product> megaBrandItems = new ArrayList<>();
+        for (int i = 0; i < 305; i++) {
+            megaBrandItems.add(Product.builder()
+                    .shopId(SHOP_ID).brand(megaBrand).name(megaBrand + " Item " + i + " Distinctive" + i + " 50 ml")
+                    .currency("RUB").build());
+        }
+        productRepository.saveAll(megaBrandItems);
+        entityManager.flush();
+
+        // The 301st item (0-indexed 300) - its name-distinctive token must still be searchable even
+        // though the brand alone already has more matches than the fetch limit.
+        NormalizedRowData row = normalizeRow(megaBrand, megaBrand + " Item 300 Distinctive300 50 ml");
+
+        List<ScoredCandidate> scored = candidateSearchService.search(SHOP_ID, row);
+
+        Long targetId = megaBrandItems.get(300).getId();
+        assertTrue(scored.stream().anyMatch(c -> c.productId().equals(targetId)),
+                "item #301 of a 305-item brand must still be reachable as a candidate by its distinctive name token");
+    }
+
+    /**
+     * Six-bug hardening pass regression: {@code DeterministicMatchResolver}'s exact-supplier-article
+     * fallback used to look up {@code Product.supplierArticle} scoped only by shop, not supplier -
+     * two different suppliers coincidentally using the same internal article number for two
+     * unrelated products (reproduced by the report as Dior matching Chanel as EXACT) must never be
+     * silently trusted.
+     */
+    @Test
+    void coincidentalArticleCollisionAcrossDifferentSuppliers_isNeverAutoMatchedAsExact() {
+        Supplier supplierA = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier A").build());
+        Supplier supplierB = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier B").build());
+
+        Product chanel = productRepository.save(Product.builder()
+                .shopId(SHOP_ID).brand("Chanel").name("Chanel No 5 100 ml")
+                .supplierArticle("SAME-ARTICLE-123").currency("RUB").build());
+        supplierProductLinkRepository.save(SupplierProductLink.builder()
+                .shopId(SHOP_ID).supplier(supplierA).product(chanel).externalSku("SAME-ARTICLE-123")
+                .confirmedSource(LinkConfirmationSource.AUTOMATIC).build());
+        entityManager.flush();
+
+        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Dior",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Dior Sauvage 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SAME-ARTICLE-123"));
+
+        MatchResolution resolution = matchResolver.resolve(SHOP_ID, supplierB.getId(), diorRowFromSupplierB);
+
+        assertFalse(resolution.isResolved() && chanel.getId().equals(resolution.matchedProductId()),
+                "a bare article-number coincidence from a DIFFERENT supplier must never auto-match "
+                        + "onto a product already linked to another supplier");
     }
 }

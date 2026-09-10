@@ -215,6 +215,53 @@ class ImportBatchApplyServiceTest {
         assertFalse(reloadedProduct.getVisible(), "product with zero active offers must not be visible on storefront");
     }
 
+    /**
+     * Six-bug hardening pass regression: a FULL snapshot batch that has one row present in the file
+     * but which failed processing (e.g. an invalid price, reproduced by the report as "two rows
+     * apply, a third becomes INVALID") must NOT deactivate/hide that product - only a product
+     * genuinely absent from the file (no row referencing it at all) may be deactivated.
+     */
+    @Test
+    void fullSnapshot_rowPresentButInvalid_isProtectedFromDeactivation_onlyGenuinelyAbsentOffersDeactivate() {
+        SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        Product presentButRowFailed = saveProduct("PresentButRowFailed", true);
+        Product genuinelyAbsent = saveProduct("GenuinelyAbsent", true);
+
+        supplierOfferRepository.save(SupplierOffer.builder()
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope())
+                .product(presentButRowFailed).externalSku("SKU-BAD-PRICE")
+                .supplierPrice(new BigDecimal("100.00")).appliedCommissionPercent(new BigDecimal("30.00"))
+                .calculatedSitePrice(new BigDecimal("130.00")).stockQuantity(5).active(true).build());
+        supplierOfferRepository.save(SupplierOffer.builder()
+                .shopId(SHOP_A).supplier(supplier).supplierSource(source).snapshotScope(source.getSnapshotScope())
+                .product(genuinelyAbsent).externalSku("SKU-ABSENT")
+                .supplierPrice(new BigDecimal("50.00")).appliedCommissionPercent(new BigDecimal("30.00"))
+                .calculatedSitePrice(new BigDecimal("65.00")).stockQuantity(3).active(true).build());
+        flushClear();
+
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        // This row IS in the file (its raw externalSku is recorded) but its price failed validation
+        // at parse time, so it never reached AUTO_APPROVED/matching - "genuinelyAbsent" has no row
+        // at all this batch, i.e. it truly disappeared from the supplier's snapshot.
+        addInvalidRowWithRawExternalSku(batchId, "SKU-BAD-PRICE");
+        flushClear();
+
+        importBatchApplyService.applyNewly(batchId);
+        flushClear();
+
+        ImportBatch batch = reloadBatch(batchId);
+        assertEquals(ImportBatchStatus.APPLIED, batch.getStatus());
+        assertEquals(1, batch.getProductsRemovedFromStorefrontCount(),
+                "only the genuinely-absent product must be removed from the storefront");
+        assertEquals(1, batch.getOffersProtectedFromDeactivationCount(),
+                "the row-failed-but-present offer must be counted as protected, not silently untouched");
+
+        assertTrue(reloadProduct(presentButRowFailed.getId()).getVisible(),
+                "a product whose row failed processing (but is present in the file by identifier) must stay visible");
+        assertFalse(reloadProduct(genuinelyAbsent.getId()).getVisible(),
+                "a product genuinely absent from the file must still be deactivated/hidden");
+    }
+
     @Test
     void deltaSnapshot_neverDeactivatesMissingOffers() {
         SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
@@ -570,6 +617,20 @@ class ImportBatchApplyServiceTest {
                 .shopId(SHOP_A).importBatch(batch).sourceRowNumber(2).rawData("{}")
                 .normalizedData(toJson(normalized("SKU-INVALID", null, null, "Brand", null)))
                 .status(ImportRowStatus.AUTO_APPROVED).build());
+    }
+
+    /**
+     * Mirrors what {@code SpreadsheetParser}/{@code ImportBatchParseWriter} actually persist for a
+     * row that failed validation (e.g. bad price): {@code rawData} still carries the raw {@code
+     * externalSku} that was in the file, but the row's status is {@code INVALID} and it never has
+     * {@code normalizedData} - it never reached matching/normalization at all.
+     */
+    private void addInvalidRowWithRawExternalSku(Long batchId, String externalSku) {
+        ImportBatch batch = importBatchRepository.findById(batchId).orElseThrow();
+        importRowRepository.save(ImportRow.builder()
+                .shopId(SHOP_A).importBatch(batch).sourceRowNumber(2)
+                .rawData(toJson(java.util.Map.of(LayoutRuleDefinition.FIELD_EXTERNAL_SKU, externalSku)))
+                .status(ImportRowStatus.INVALID).build());
     }
 
     private NormalizedRowData normalized(String externalSku, String barcode, String price, String brand, Integer stock) {

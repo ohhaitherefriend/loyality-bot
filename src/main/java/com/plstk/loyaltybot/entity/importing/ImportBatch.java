@@ -112,6 +112,15 @@ public class ImportBatch {
     /** Products that became visible on storefront again because of a reactivated/new offer in this apply. */
     private Integer productsReactivatedCount;
 
+    /**
+     * FULL-snapshot offers whose product was matched by externalSku/barcode to a row present in
+     * this file that did NOT apply successfully (e.g. INVALID price) - protected from the stale
+     * -offer deactivation sweep instead of being hidden from the storefront (ADR-022). Non-zero
+     * means at least one row needs operator attention even though the batch as a whole reached
+     * APPLIED.
+     */
+    private Integer offersProtectedFromDeactivationCount;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

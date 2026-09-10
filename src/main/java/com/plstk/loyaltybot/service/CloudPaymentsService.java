@@ -5,6 +5,7 @@ import com.plstk.loyaltybot.repository.PlanRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -12,6 +13,7 @@ import org.springframework.web.client.RestTemplate;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
@@ -23,6 +25,7 @@ public class CloudPaymentsService {
 
     private final SubscriptionService subscriptionService;
     private final PlanRepository planRepository;
+    private final Environment environment;
 
     @Value("${cloudpayments.public-id:}")
     private String publicId;
@@ -46,11 +49,30 @@ public class CloudPaymentsService {
     }
 
     /**
+     * True when running under the {@code prod} Spring profile - same
+     * {@code environment.getActiveProfiles()} check {@code SecurityConfig} already uses to decide
+     * production-only behavior. A missing API secret is a legitimate "no live gateway configured
+     * yet" dev/stub signal (ADR-020) everywhere else, but in production it can only mean a
+     * misconfiguration, and must never be treated as "skip the check" (ADR-026).
+     */
+    private boolean isProdProfile() {
+        return Arrays.asList(environment.getActiveProfiles()).contains("prod");
+    }
+
+    /**
      * Валидация HMAC подписи от CloudPayments.
      * CloudPayments подписывает тело запроса HMAC-SHA256, ключ — API secret.
      */
     public boolean validateHmac(String body, String hmacHeader) {
         if (apiSecret == null || apiSecret.isBlank()) {
+            if (isProdProfile()) {
+                // ADR-026: production must fail closed - an unsigned/unverifiable webhook is
+                // rejected rather than silently accepted, even though the same missing-secret
+                // signal is treated as "dev/stub mode" outside of prod (ADR-020).
+                log.error("CloudPayments API secret not configured in the prod profile - rejecting "
+                        + "webhook instead of skipping HMAC validation");
+                return false;
+            }
             log.warn("CloudPayments API secret not configured, skipping HMAC validation");
             return true;
         }

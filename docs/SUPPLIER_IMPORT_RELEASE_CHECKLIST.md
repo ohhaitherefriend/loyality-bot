@@ -1,26 +1,30 @@
-# Supplier Import Automation — Release Checklist (Prompt 10, обновлено Stage 1-10 hardening)
+# Supplier Import Automation — Release Checklist (обновлено после третьего раунда — 6 bug fixes)
 
 Итог финальной ревизии (`prompts/10-final-review.md`) поверх end-to-end supplier-import pipeline
-(Prompt 01-09), **обновлён** после второго hardening-раунда ("Stage 1-10 automatic supplier-import
+(Prompt 01-09), обновлён после второго hardening-раунда ("Stage 1-10 automatic supplier-import
 hardening": `SupplierSource` PATCH/graduate, `NEEDS_ATTENTION` approve, FULL snapshot scope fix,
 large-catalog matching + brand aliases, DeepSeek hardening, Postgres/Flyway, role-aware auth,
-security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-011…021). Это
-операционный чеклист для человека, включающего автоматизацию для реального поставщика/окружения —
-не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений (см. `docs/DECISIONS.md`).
+security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-011…021), и **снова
+обновлён** после третьего раунда — шесть существенных, независимо воспроизведённых пользователем
+багов в областях, ранее объявленных "resolved" вторым раундом (FULL snapshot, article matching,
+candidate search limit, autoApply gates, CloudPayments/billing, CI branch — `docs/DECISIONS.md`
+ADR-022…027). Это операционный чеклист для человека, включающего автоматизацию для реального
+поставщика/окружения — не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений
+(см. `docs/DECISIONS.md`).
 
 ## 1. Build/test gate (обязательно перед релизом)
 
 Все команды выполняются из корня репозитория.
 
-| Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-06) |
+| Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-10) |
 | --- | --- | --- |
 | Backend компиляция | `./mvnw -q -o compile` | без ошибок |
-| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 325, Failures: 0, Errors: 0` (49 классов, включая `FlywayPostgresSchemaTest` против реального PostgreSQL — требует локальный Docker) |
+| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 337, Failures: 0, Errors: 1` (1 error = `FlywayPostgresSchemaTest`, требует локальный Docker — pre-existing environment limitation, не регрессия; на CI runner'е с Docker ожидается `Errors: 0`) |
 | Backend package | `./mvnw -o package -DskipTests` | success |
 | Frontend lint | `npm run lint` (в `admin-panel/`) | `0 errors` (несколько pre-existing warnings, не блокирующие) |
 | Frontend build | `npm run build` (в `admin-panel/`) | success (bundle warning про chunk size — известный, не блокирующий) |
 | Frontend tests | `npx vitest run` (в `admin-panel/`) | `Test Files 6 passed (6)`, `Tests 21 passed (21)` |
-| CI (автоматически на push/PR) | `.github/workflows/backend.yml` + `.github/workflows/frontend.yml` | те же команды выше, теперь на каждый push/PR (Stage 9/ADR-021) |
+| CI (автоматически на push/PR) | `.github/workflows/backend.yml` + `.github/workflows/frontend.yml` | те же команды выше, теперь на `push`/`pull_request` к `master` (исправлено в раунде 3, ADR-027 — ранее ошибочно указывало `main`, из-за чего CI никогда не запускался на push) |
 
 Нет отдельного E2E-suite вне `mvn test` — три сквозных сценария (`SupplierImportEndToEndTest`,
 Prompt 09/ADR-009) запускаются в составе обычного backend suite, не отдельной командой.
@@ -118,6 +122,34 @@ Prompt 09/ADR-009) запускаются в составе обычного bac
   отклоняющийся от closed-vocabulary schema; system prompts (ADR-009) явно помечают cell-контент
   как untrusted data.
 
+## 2b. Раунд 3 (2026-09-10) — шесть пользователем воспроизведённых багов в "resolved" областях
+
+В отличие от §2 (внутренняя ревизия), эти шесть багов были обнаружены и воспроизведены пользователем
+**после** того как раунд 2 объявил соответствующие области закрытыми — прямое доказательство, что
+"нет находок при внутренней ревизии" не равно "багов нет". Полные детали, включая тест, точно
+воспроизводящий каждый репорт — `docs/DECISIONS.md` ADR-022…027; `docs/STATE.md` → «Third round» для
+таблицы root cause/fix. Кратко:
+
+1. **FULL-импорт скрывал товар с невалидной строкой** — строка становится `INVALID` до этапа
+   apply, но FULL-деактивация не отличала «строки для этого товара реально нет в файле» от «строка
+   есть, но не прошла обработку» → товар пропадал с витрины. **Исправлено (ADR-022).**
+2. **Совпадающие артикулы разных поставщиков склеивались как `EXACT` match** — точное сопоставление
+   по артикулу было scoped только по `shopId`, не по поставщику. **Исправлено (ADR-023).**
+3. **Лимит кандидатов 300 был исправлен частично** — для бренда, уже имеющего 300+ товаров,
+   поиск по имени вообще не выполнялся (бренд-запрос сам заполнял лимит). **Исправлено (ADR-024).**
+4. **Проверки автоматики обходились простым PATCH** — `PATCH` мог включить `autoApply` в обход
+   всех проверок `/graduate`; пустой список доверенных отправителей допускался даже при
+   `autoApply=true`. **Исправлено (ADR-025).**
+5. **Платёжная защита не была полной** — отсутствие секрета CloudPayments приводило к
+   безусловному пропуску проверки подписи; `activate-stub`/`extend-trial` были доступны любому
+   участнику магазина, не только владельцу. **Исправлено (ADR-026).**
+6. **CI не запускался на реальной рабочей ветке** — оба workflow триггерились на `main`, а
+   реальная ветка — `master`; `npm audit` никогда не мог провалить сборку. **Исправлено (ADR-027).**
+
+Все шесть покрыты новым/обновлённым regression-тестом, точно воспроизводящим репорт (не просто
+проверкой, что код компилируется). Build/test gate §1 подтверждает отсутствие регрессий в остальном
+пайплайне после этих изменений.
+
 ## 3. Automation rate — как измерить перед приёмкой
 
 `docs/ARCHITECTURE.md` §15 называет **automation rate** главным продуктовым показателем: доля
@@ -203,9 +235,30 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
    §14.8) — один выборочный ручной прогон перед тем, как доверять этому по умолчанию для конкретного
    магазина.
 
-## 6. Известные ограничения (обновлено после Stage 1-10 hardening)
+## 6. Известные ограничения (обновлено после раунда 3 — 6 bug fixes)
 
-Не переоткрывать/не пере-исследовать — уже задокументированы, ссылки для контекста.
+Не переоткрывать/не пере-исследовать без нового измеренного повода — уже задокументированы, ссылки
+для контекста. **Оговорка после раунда 3**: несколько пунктов ниже, помеченных как "Resolved"
+вторым раундом, оказались резолвены не полностью — см. §2b и `docs/DECISIONS.md` ADR-022…027 для
+того, что именно было упущено и как исправлено сейчас. Формулировка "Resolved" в этом файле означает
+"нет известной открытой проблемы на момент этого ADR", а не гарантию отсутствия багов.
+
+**Закрыто раундом 3** (2026-09-10, не открывать заново без нового измеренного повода):
+
+- ~~FULL-импорт мог скрыть товар, чья строка стала `INVALID`~~ — **Resolved (ADR-022):** raw-identity
+  cross-check по всем строкам batch перед деактивацией, независимо от статуса строки.
+- ~~Точное сопоставление по артикулу не учитывало поставщика~~ — **Resolved (ADR-023):** проверка
+  существующего `SupplierProductLink` на другого поставщика перед авто-матчем.
+- ~~Лимит 300 кандидатов блокировал поиск по имени для брендов с 300+ товарами~~ — **Resolved
+  (ADR-024):** комбинированный brand+name запрос + безусловный запуск name-widening запроса.
+- ~~PATCH мог включить `autoApply` в обход проверок `/graduate`; пустой allowlist разрешён~~ —
+  **Resolved (ADR-025):** общий `assertReadyForAutoApply` gate для обоих endpoint'ов + проверка
+  непустого `senderAllowlist`.
+- ~~CloudPayments HMAC пропускал проверку при отсутствии секрета безусловно; billing bypass
+  endpoints доступны любому участнику~~ — **Resolved (ADR-026):** fail-closed в `prod` профиле;
+  `OWNER`-only для `activate-stub`/`extend-trial`.
+- ~~CI указывал `main`, реальная ветка `master`; `npm audit` не блокировал~~ — **Resolved
+  (ADR-027):** `push.branches: [master]`; blocking `--audit-level=critical` gate.
 
 **Закрыто вторым hardening-раундом** (не открывать заново без нового измеренного повода):
 
@@ -252,8 +305,12 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
 
 Перед тем как считать эту автоматизацию готовой к продакшену для конкретного магазина/поставщика:
 
-- [ ] §1 build/test gate — все пять команд зелёные на актуальном коммите.
+- [ ] §1 build/test gate — все команды зелёные на актуальном коммите (кроме `FlywayPostgresSchemaTest`
+      без локального Docker — на реальном CI runner'е с Docker ожидается 0 ошибок).
 - [ ] §2 — прочитан список исправлений (или ADR-010 целиком), нет открытых Critical/High.
+- [ ] §2b — прочитан список из шести раунд-3 багов (ADR-022…027); ответственный оператор понимает,
+      что "Resolved" во втором раунде для этих же областей оказалось неполным, и относится к текущим
+      "Resolved" пометкам как к «нет известной проблемы сейчас», а не как к гарантии.
 - [ ] §3 — automation rate измерен и явно принят для этого поставщика.
 - [ ] §4 — shadow-mode acceptance пройден по всем пяти пунктам перед `autoApply=true`.
 - [ ] §5 — FULL snapshot чеклист пройден перед первым реальным FULL apply для этого источника.

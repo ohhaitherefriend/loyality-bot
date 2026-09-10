@@ -25,4 +25,14 @@ public interface SupplierProductLinkRepository extends JpaRepository<SupplierPro
      * distinct linked product as ambiguous rather than picking one.
      */
     List<SupplierProductLink> findByShopIdAndFingerprintAndProductIsNotNull(String shopId, String fingerprint);
+
+    /**
+     * True if {@code productId} is already linked to some OTHER supplier than {@code supplierId}.
+     * Used to reject a coincidental cross-supplier {@code supplierArticle} collision in
+     * {@code DeterministicMatchResolver#resolveViaExactSupplierArticle} - a product already
+     * "owned" (for identifier-matching purposes) by a different supplier must never be silently
+     * re-matched onto a different supplier's row just because an internal SKU string happens to
+     * be equal (docs/DECISIONS.md ADR-023).
+     */
+    boolean existsByShopIdAndProductIdAndSupplierIdNot(String shopId, Long productId, Long supplierId);
 }

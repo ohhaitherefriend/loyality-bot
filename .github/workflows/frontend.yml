@@ -2,7 +2,7 @@ name: Frontend CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'admin-panel/**'
       - '.github/workflows/frontend.yml'
@@ -43,7 +43,14 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Audit dependencies (non-blocking)
-        # Surface known-vulnerable dependencies without failing the build on advisories
-        # that don't yet have a fix available; see docs/DECISIONS.md for the audit policy.
+      - name: Audit dependencies (blocking on critical)
+        # Actually fails the build on critical-severity advisories (currently 0 - passes today).
+        # This is the one severity level with no accepted/deferred exceptions, so it can enforce
+        # for real instead of being a no-op; see docs/DECISIONS.md ADR-022 for why high/moderate
+        # are reported but not blocking (4 known findings need breaking upstream upgrades and are
+        # tracked separately, not silently ignored).
+        run: npm audit --audit-level=critical
+
+      - name: Audit dependencies (high/moderate, non-blocking report)
+        # Surfaces the deferred findings in every CI run's logs without re-blocking on them here.
         run: npm audit --audit-level=high || true

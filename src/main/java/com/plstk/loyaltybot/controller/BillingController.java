@@ -2,6 +2,7 @@ package com.plstk.loyaltybot.controller;
 
 import com.plstk.loyaltybot.entity.AdminUser;
 import com.plstk.loyaltybot.entity.Plan;
+import com.plstk.loyaltybot.entity.ShopMember.MemberRole;
 import com.plstk.loyaltybot.entity.Subscription;
 import com.plstk.loyaltybot.repository.PlanRepository;
 import com.plstk.loyaltybot.service.AuthorizationService;
@@ -51,13 +52,18 @@ public class BillingController {
         return ResponseEntity.ok(toResponse(info));
     }
 
+    /**
+     * Stub activation grants a subscription without any real payment, so it must never be reachable
+     * by an ordinary shop member the way plain {@code hasAccess} would allow - restricted to the
+     * shop owner, same floor as {@code /graduate} for supplier-import automation (ADR-026).
+     */
     @PostMapping("/activate-stub")
     public ResponseEntity<SubscriptionResponse> activateStub(
             @RequestParam String shopId,
             @RequestParam(defaultValue = "BASIC_MONTHLY") String planCode,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!hasAccessToShop(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.OWNER)) {
             return ResponseEntity.status(403).build();
         }
 
@@ -71,13 +77,14 @@ public class BillingController {
         }
     }
 
+    /** Same OWNER floor as {@link #activateStub} - free trial time is a billing bypass too (ADR-026). */
     @PostMapping("/extend-trial")
     public ResponseEntity<SubscriptionResponse> extendTrial(
             @RequestParam String shopId,
             @RequestParam(defaultValue = "7") int days,
             @AuthenticationPrincipal AdminUser user) {
 
-        if (!hasAccessToShop(user, shopId)) {
+        if (!authorizationService.hasRole(user, shopId, MemberRole.OWNER)) {
             return ResponseEntity.status(403).build();
         }
 

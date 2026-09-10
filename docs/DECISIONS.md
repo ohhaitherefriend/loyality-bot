@@ -2163,3 +2163,274 @@ trusted to have been run manually.
    this environment; frontend `npm audit` (which needs no API key) was prioritized instead since it
    was explicitly requested and achievable without additional credentials.
 
+## ADR-022 — Six-bug hardening pass, bug 1: FULL snapshot must not deactivate a product whose row failed processing (2026-09-10)
+
+### Контекст
+
+A user-reported, reproduced bug: a FULL-mode price file with 3 rows, one of which has an invalid
+price. Two rows apply normally; the third becomes `INVALID` at parse time (before matching ever
+runs on it) and is excluded from the apply loop's `APPLIABLE_STATUSES`. `ImportBatchApplyWriter`'s
+FULL-snapshot reconciliation step (`SupplierOfferRepository#findStaleActiveOffersInScope`)
+deactivates every active offer whose `lastSeenBatch` wasn't stamped by *this* batch — which is true
+of the `INVALID` row's product too, since it never reached the apply loop at all. The product is
+hidden from the storefront exactly as if it had genuinely disappeared from the supplier's file,
+even though it's right there in the file, just with a bad price. `BatchApplyGuardEvaluator`'s
+existing guards (row-count collapse, duplicate-identifier explosion, price-delta anomaly) don't
+catch this — none of them look at *which specific offers* are about to be deactivated, only
+batch-wide aggregates.
+
+### Решение
+
+`ImportBatchApplyWriter.applyBatch` now collects every `externalSku`/`barcode` present anywhere in
+the batch's raw row data (`ImportRow.rawData`, populated by `SpreadsheetParser` for every row
+regardless of validity — see `ImportBatchParseWriter#finalizeSuccess`), across ALL rows of the
+batch, not just the successfully-applied ones. Before deactivating a "stale" offer, it checks
+whether that offer's own `externalSku`/`barcode` appears in that set: if so, the offer is
+protected from deactivation instead — the row that should have refreshed it exists in this file,
+it just didn't reach `APPLIED`. A protected offer keeps its last known-good price/stock/visibility
+untouched (not stamped with this batch either — a batch with a bad price for that row still hasn't
+given us a trustworthy new price). New `ImportBatch.offersProtectedFromDeactivationCount` (V29
+migration) and `BatchDetailResponse`/admin-panel `BatchDetailPage` surface this instead of it being
+a silent no-op, so an operator can see "N offer(s) protected" and go investigate the failing row.
+
+### Тесты
+
+`ImportBatchApplyServiceTest#fullSnapshot_rowPresentButInvalid_isProtectedFromDeactivation_onlyGenuinelyAbsentOffersDeactivate`
+reproduces the exact report: one product with an `INVALID` row referencing its `externalSku`
+stays visible; a second product with genuinely no row at all this batch is still correctly
+deactivated. All 6 pre-existing `ImportBatchApplyServiceTest` FULL/DELTA/scope-isolation cases
+still pass unchanged.
+
+### Осознанные ограничения
+
+1. **Only protects by `externalSku`/`barcode` identity** — a row whose identifier itself is missing
+   or unreadable (e.g. garbled cell, not just a bad price) still can't be distinguished from a
+   genuinely absent product, since there is no other stable signal to correlate it to an existing
+   offer. This matches every other identity-based safeguard already in this codebase (deterministic
+   matching, `SupplierProductLink`) — all of them require a stable identifier to work at all.
+2. **Protected offers are not automatically retried** — the underlying row still needs a human or a
+   corrected re-upload; this ADR only stops the false deactivation, it does not add new automatic
+   remediation for the bad row itself (that's `ImportExceptionQueueService`'s existing job).
+
+## ADR-023 — Six-bug hardening pass, bug 2: exact supplier-article matching must be scoped by supplier, not just shop (2026-09-10)
+
+### Контекст
+
+A user-reported, reproduced bug: two different suppliers' rows happen to use the same internal
+article/SKU string for two completely unrelated products (repro: a Dior row matched an existing
+Chanel product as `EXACT`). `DeterministicMatchResolver#resolveViaExactSupplierArticle` looked up
+`Product.supplierArticle` (a single denormalized column reflecting whichever supplier most
+recently wrote it) filtered only by `shopId`. Unlike barcode — a universal real-world identifier
+that different suppliers legitimately share for the same physical product — a supplier
+article/SKU is that supplier's own internal numbering; two unrelated suppliers coincidentally
+using the same string is common, not a signal of the same product. A false `EXACT` match silently
+substitutes one supplier's price/stock onto a completely different product/brand.
+
+### Решение
+
+`resolveViaExactSupplierArticle` now also checks, via a new
+`SupplierProductLinkRepository#existsByShopIdAndProductIdAndSupplierIdNot` query, whether the
+candidate product is already linked (by `SupplierProductLink`) to a *different* supplier than the
+one whose row is being matched. If so, the bare article-string coincidence is rejected — the
+product already "belongs" to another supplier for identifier-matching purposes, and it falls
+through to the fuzzy/AI candidate stage exactly like any other unresolved row, instead of being
+auto-matched. Barcode matching (`resolveViaExactBarcode`) is deliberately left shop-scoped only —
+barcode collisions across suppliers for the same physical product are the whole point of that
+step.
+
+### Тесты
+
+`LargeCatalogMatchingTest#coincidentalArticleCollisionAcrossDifferentSuppliers_isNeverAutoMatchedAsExact`
+reproduces the report directly: a Chanel product linked to "Supplier A" via a `SupplierProductLink`
+with article `SAME-ARTICLE-123`, then a Dior row from "Supplier B" carrying the same article
+string — asserts the resolver never returns `EXACT` onto the Chanel product for the Dior row.
+
+### Осознанные ограничения
+
+1. **Only protects products that already have at least one `SupplierProductLink`** — a product
+   catalogued once by a legacy manual import (never through the supplier-import pipeline) has no
+   link yet, so its first coincidental collision with any supplier's article is still not caught by
+   this specific check (though `CriticalAttributeConflictChecker`'s existing attribute checks still
+   apply on top). In practice, every product that has gone through at least one successful apply
+   already has a link (see `ImportBatchApplyWriter#upsertLink`), so this covers the overwhelmingly
+   common case.
+
+## ADR-024 — Six-bug hardening pass, bug 3: brand with more than the candidate-fetch-limit items must still be searchable by name (2026-09-10)
+
+### Контекст
+
+A user-reported, reproduced bug: the Stage 4 fix (ADR for the original 300-item cap) was only a
+partial fix. `SimpleProductCandidateFetcher#search` ran the brand-token query first, then only ran
+the name-substring widening query `if (byId.size() < limit)`. When a single brand already has more
+products than `candidate-fetch-limit` (default 300), the brand-only query alone fills that limit
+on its own — so the name-based step never runs at all for that brand, and any product past the
+brand query's own page window (repro: catalog item #301 of a 305-item brand) can never become a
+candidate, however distinctive its name. This reintroduces the exact duplicate-product risk Stage
+4 was meant to close, just one level down (per-brand instead of shop-wide).
+
+### Решение
+
+Two changes to `SimpleProductCandidateFetcher.search`:
+
+1. A new, more targeted `ProductRepository#findByShopIdAndBrandTokenInAndNameToken` query (brand
+   token IN + name LIKE, combined) runs FIRST, before the brand-only query. For a large brand, this
+   narrows straight to the row's specific name token instead of relying on the brand-only query's
+   id-ordered page window ever reaching that specific product.
+2. The name-substring widening query no longer checks `byId.size() < limit` before running — it
+   always runs, so a brand that already filled the limit on its own no longer blocks it. The
+   combined query's results are inserted first, so they always survive the final `.limit(limit)`
+   truncation even when the total pool (brand + name-only + id fallback) exceeds `limit`.
+
+### Тесты
+
+`LargeCatalogMatchingTest#brandWithMoreThan300Items_stillSurfacesLateItemByName_viaCombinedBrandAndNameSearch`
+reproduces the report directly: a 305-item single brand, searching for item #301 (0-indexed 300)
+by its distinctive name token — asserts it is present in the returned candidates. All 5
+pre-existing `LargeCatalogMatchingTest` cases (id-far-past-300 exact/fuzzy/transliteration
+matching) still pass unchanged.
+
+### Осознанные ограничения
+
+1. **Still bounded by `candidateFetchLimit` overall** — this fix restores recall for the *specific*
+   name-matched item within an oversized brand; it does not remove the configured ceiling on total
+   candidates considered per row, which remains a deliberate performance/memory bound (see the
+   original Stage 4 ADR).
+
+## ADR-025 — Six-bug hardening pass, bug 4: a plain PATCH must go through the same autoApply safety gate as /graduate (2026-09-10)
+
+### Контекст
+
+Two user-reported, reproduced bugs on `SupplierSource` automation safety:
+
+1. `PATCH /supplier-sources/{id}` could set `autoApply=true` (with `confirmAutoApply=true`)
+   directly, without ever going through `/graduate`'s checks (at least one successfully-guarded
+   shadow batch, no open `QUARANTINED`/`FAILED` batch, no unresolved `NEEDS_REVIEW` row) — `/graduate`
+   was a stricter path that a plain PATCH could simply route around to reach the exact same end
+   state (`shadowMode=false`, `autoApply=true`).
+2. An empty/blank `senderAllowlist` was (and remains) accepted by validation on both create and
+   PATCH. `SupplierSourceMatcher` treats an empty allowlist as "accept mail from any sender" by
+   design (a freshly-created, not-yet-configured source shouldn't be silently useless) — but for a
+   source that will `autoApply` unattended, an unrestricted sender means anyone who learns the
+   mailbox address can get their attachment auto-ingested and auto-applied to the live catalog.
+
+### Решение
+
+Both `SupplierSourceAdminService.graduate` and `updateSource` (when the PATCH is turning
+`autoApply` on) now call the same new private `assertReadyForAutoApply(shopId, sourceId, source)`
+gate — one gate, one set of checks, regardless of which endpoint reaches it. The gate adds a new
+check on top of the pre-existing shadow-batch/open-batch/NEEDS_REVIEW checks: `senderAllowlist`
+must be non-blank. A source can still be created and run in shadow mode with an empty/permissive
+allowlist (matches every attachment for manual review — not itself dangerous), but it can never be
+flipped to `autoApply` while the allowlist is empty, through either endpoint.
+
+### Тесты
+
+`SupplierSourceAdminServiceTest` (new): PATCH turning on `autoApply` without any successful shadow
+batch is rejected with a `shadowMode` field error (same as `/graduate` would reject it); PATCH with
+an empty allowlist is rejected with a `senderAllowlist` field error; PATCH with an unresolved
+`NEEDS_REVIEW` row is rejected; PATCH succeeds once all gates are satisfied; `/graduate` itself is
+covered symmetrically (no confirm → rejected, empty allowlist → rejected, all gates pass → flips
+`shadowMode`/`autoApply` correctly); a source created with an empty allowlist may still exist in
+shadow mode but cannot later PATCH `autoApply` on until the allowlist is set.
+
+### Осознанные ограничения
+
+1. **`senderAllowlist` non-blank is only enforced at the moment `autoApply` turns on** — an operator
+   can still blank it out again afterward via a PATCH that doesn't touch `autoApply` (since
+   `autoApply` isn't "turning on" in that request, the gate doesn't re-run). Catching "an
+   already-autoApply source loses its allowlist" as its own invariant was judged out of scope for
+   this pass; it would need a symmetric check keyed off the *current* `autoApply` value rather than
+   the transition, which risks blocking innocuous unrelated PATCHes to an existing live source.
+
+## ADR-026 — Six-bug hardening pass, bug 5: CloudPayments must fail closed in production; stub/trial billing bypass endpoints restricted (2026-09-10)
+
+### Контекст
+
+Two user-reported, reproduced bugs:
+
+1. `CloudPaymentsService.validateHmac` returns `true` (skips the check entirely) whenever
+   `CLOUDPAYMENTS_API_SECRET` is unset — by design per ADR-020, treating "no secret" as an explicit
+   dev/stub-mode signal. That is a reasonable default locally, but in a real production deployment a
+   missing secret can only be a misconfiguration, and the existing behavior means an attacker could
+   send a completely unsigned `pay`/`recurrent` webhook and have it silently accepted and acted on.
+2. `POST /api/billing/activate-stub` and `POST /api/billing/extend-trial` — both grant subscription
+   state with zero real payment — were reachable by any shop member with `hasAccess` (i.e. `STAFF`),
+   not just the owner.
+
+### Решение
+
+1. `CloudPaymentsService` now injects Spring's `Environment` and checks
+   `environment.getActiveProfiles()` for `"prod"` — the exact same pattern `SecurityConfig` already
+   uses. When the `prod` profile is active AND no API secret is configured, `validateHmac` now
+   returns `false` (reject, logged as an error) instead of `true`. Outside of `prod`, the existing
+   dev/stub-mode skip behavior (ADR-020) is unchanged, so local development and demo environments
+   are unaffected.
+2. `BillingController.activateStub`/`extendTrial` now require `authorizationService.hasRole(user,
+   shopId, MemberRole.OWNER)` — the same floor already used for `/graduate` on the supplier-import
+   side for an analogous reason (a powerful, abusable, no-real-cost action).
+
+### Тесты
+
+`CloudPaymentsServiceTest#validateHmac_noSecretConfiguredInProdProfile_rejectsInsteadOfSkipping`
+(new, using `MockEnvironment` with the `prod` profile active) and
+`#validateHmac_noSecretConfiguredOutsideProdProfile_stillSkipsValidation` (new, confirms dev/stub
+mode is unchanged). `BillingControllerTest#activateStub_asOrdinaryStaffMember_isForbidden`,
+`#activateStub_asOwner_succeeds`, `#extendTrial_asOrdinaryAdminMember_isForbidden` (new). All
+pre-existing `CloudPaymentsServiceTest`/`BillingControllerTest` cases still pass unchanged (updated
+only to pass a `MockEnvironment` to the service's new constructor parameter).
+
+### Осознанные ограничения
+
+1. **`confirm-payment`'s existing `isLiveGatewayConfigured()` stub-mode allowance is unchanged** —
+   the user's report did not call this out specifically, and it's a materially different code path
+   (client-triggered "I already paid" confirmation, not an unsigned inbound webhook). A production
+   deployment running with no CloudPayments secret configured at all would still let a client
+   self-activate via `confirm-payment` in that narrow misconfiguration scenario; flagged here as a
+   known gap for a future pass rather than folded into this one to keep this change minimal and
+   targeted at what was actually reported.
+2. **OWNER-only for `activate-stub`/`extend-trial` has no separate `SYSTEM_ADMIN_EMAILS`-style
+   platform-level restriction** — any shop's own owner can still stub-activate or extend their own
+   shop's trial. This is intentional (it's their own shop's billing state, not another tenant's) and
+   distinct from the ADR-020 `SYSTEM_ADMIN_EMAILS` platform-wide endpoints.
+
+## ADR-027 — Six-bug hardening pass, bug 6: CI must actually run on the real working branch (2026-09-10)
+
+### Контекст
+
+A user-reported, reproduced bug: both `.github/workflows/backend.yml` and `frontend.yml` (added in
+ADR-021, Stage 9) trigger `push` on `branches: [main]`, but this repository's actual default/
+working branch is `master` — confirmed via `git symbolic-ref refs/remotes/origin/HEAD` and GitHub
+showing zero Actions runs for the commit in question. Every push to `master` since Stage 9 has
+silently never triggered CI at all; only `pull_request` events (which don't filter by base branch
+in these workflows) were ever actually exercised. Separately, `npm audit --audit-level=high ||
+true` in `frontend.yml` is structured so that step can never fail the build regardless of what it
+finds, at any severity — reported as "audit never blocks the build."
+
+### Решение
+
+1. Both workflows' `push.branches` changed from `[main]` to `[master]`, matching the repository's
+   actual branch.
+2. `frontend.yml`'s audit step split into two: `npm audit --audit-level=critical` (no `|| true`) —
+   currently 0 critical findings, so it passes today, but is now a REAL gate that would fail the
+   build on any future critical-severity advisory — followed by the pre-existing `npm audit
+   --audit-level=high || true` as a separate, still-non-blocking step purely for visibility of the 4
+   already-known/deferred moderate/high findings (ADR-021) in every CI run's logs.
+
+### Тесты
+
+CI itself is the test, same as ADR-021 — there is no unit-testable artifact for "does this workflow
+YAML trigger on the right branch." Manually verified locally: `npm audit --audit-level=critical`
+exits `0` (passes) and `npm audit --audit-level=high` exits `1` (would fail if not for the
+deliberately-separate non-blocking step) against the current `admin-panel/package-lock.json`.
+
+### Осознанные ограничения
+
+1. **Still no branch-protection rule enforced from the codebase** — same limitation already noted
+   in ADR-021; whether GitHub is configured to require these checks before merge is a repository
+   settings decision outside this codebase's control, and this ADR does not (cannot) change that.
+2. **`critical`-level audit gate has zero findings today, so it is currently untested against a
+   real failure** — it is mechanically identical to the pre-existing `high`-level step (which HAS
+   been observed to correctly exit non-zero locally), just at a stricter threshold, so this is a low
+   risk, but it has not been observed to actually fail a real CI run yet since there is no
+   `critical`-severity advisory in the current dependency tree to trigger it.
+

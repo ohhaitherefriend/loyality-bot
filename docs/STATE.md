@@ -4,14 +4,16 @@
 
 ## Current stage
 
-- Stage: `AUTOMATIC_SUPPLIER_IMPORT_HARDENING_ROUND_2_COMPLETE`
-- Active work: 10-stage "automatic supplier-import hardening" round (Stage 1-10, see
-  `docs/DECISIONS.md` ADR-011…021) — a second hardening pass over the same pipeline documented
-  below as "Prompt 00-10" (that section is left as historical record, not rewritten)
-- Last verified: `./mvnw -o test` — 325/325 green (49 test classes, incl. `FlywayPostgresSchemaTest`
-  against a real PostgreSQL Testcontainer); `npm run lint` — 0 errors; `npm run build` — success;
-  `npx vitest run` — 21/21 green (6 files)
-- Updated at: `2026-09-07 02:20 +03:00`
+- Stage: `SIX_BUG_HARDENING_ROUND_3_COMPLETE`
+- Active work: a third, user-reported bug-hunting round — six substantial, independently-reproduced
+  correctness/security bugs found in the round-2-hardened pipeline (see `docs/DECISIONS.md`
+  ADR-022…027). Round 2 (Stage 1-10, ADR-011…021) and Round 1 (Prompt 00-10, ADR-001…010) sections
+  below are left as historical record, not rewritten.
+- Last verified: `./mvnw -o test` — 337 tests run, 336 green, 1 error (`FlywayPostgresSchemaTest` —
+  requires a local Docker daemon not available in this sandbox; pre-existing environment limitation,
+  unrelated to Round 3 changes — see ADR note under Round 3 below); `npm run lint` — 0 errors;
+  `npm run build` — success; `npx vitest run` — 21/21 green (6 files)
+- Updated at: `2026-09-10 13:00 +03:00`
 - Uncommitted at time of writing — see "Next action" below for what's pending before a commit.
 
 ## Stage status
@@ -54,6 +56,32 @@ Verified at completion: `./mvnw -o test` — 325/325 green, 49 test classes (inc
 `npm run lint` — 0 errors; `npm run build` — success; `npx vitest run` — 21/21 green (6 files).
 See `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §1/§6 for the updated build/test gate and
 resolved/remaining limitations list.
+
+## Third round: six user-reported bugs (2026-09-10)
+
+Round 2 above was declared complete, but a subsequent user review reproduced six substantial bugs
+still present in that "complete" pipeline — proof that "no findings from an internal review" is not
+the same as "no bugs," and that automation-rate/security claims need independent reproduction, not
+just another self-review pass. Each bug below was root-caused by reading the actual current code
+(not assumed from prior ADRs) and fixed with the smallest safe change, with a new regression test
+reproducing the exact reported scenario. Full detail — `docs/DECISIONS.md` ADR-022…027.
+
+| # | Bug (as reported) | Root cause | Fix | ADR |
+| --- | --- | --- | --- | --- |
+| 1 | FULL import hides a product still present in the file (one row `INVALID` due to bad price → product disappears from storefront) | FULL-snapshot stale-offer deactivation couldn't distinguish "genuinely absent from file" from "present but failed row processing" | `ImportBatchApplyWriter` now checks every raw `externalSku`/`barcode` across ALL rows of the batch (regardless of row status) before deactivating; protected offers counted in new `ImportBatch.offersProtectedFromDeactivationCount` (`V29`), surfaced in `BatchDetailPage` | ADR-022 |
+| 2 | Coincidentally-matching supplier articles from different suppliers merge unrelated products (Dior matched to Chanel as `EXACT`) | Exact-supplier-article matching was scoped by `shopId` only, not by supplier | `DeterministicMatchResolver` now rejects the article match if the candidate product is already `SupplierProductLink`-linked to a *different* supplier | ADR-023 |
+| 3 | 300-item candidate limit fix was partial — brand with 300+ items already fills the limit, so name-based search never runs, item #301 unreachable | `SimpleProductCandidateFetcher` only ran the name-widening query `if (byId.size() < limit)` | New combined brand+name query runs first; name-widening query always runs regardless of current candidate count | ADR-024 |
+| 4 | Auto-apply safety checks skippable — plain PATCH enables `autoApply` without a successful shadow run; empty sender allowlist accepted | `updateSource` never called the same gate `graduate` used; empty allowlist had no dedicated check | New shared `assertReadyForAutoApply` gate called from both `graduate` and `updateSource` (when PATCH turns `autoApply` on); empty `senderAllowlist` now rejected when enabling `autoApply` | ADR-025 |
+| 5 | Payment protection incomplete — missing CloudPayments secret makes signature check return `true`; `activate-stub`/`extend-trial` reachable by ordinary shop members | `validateHmac` treated "no secret" as unconditional dev/stub mode (ADR-020); those two endpoints used `hasAccess` (any role) | `validateHmac` now fails closed (`false`) when no secret is configured AND the `prod` Spring profile is active; both endpoints now require `MemberRole.OWNER` | ADR-026 |
+| 6 | CI never runs on the real working branch; `npm audit` never blocks | Workflows triggered on `branches: [main]`, but the repo's real branch is `master`; audit step used `\|\| true` unconditionally | Both workflows' `push.branches` changed to `[master]`; audit split into a blocking `--audit-level=critical` gate + a separate non-blocking `--audit-level=high` visibility step | ADR-027 |
+
+Verified after Round 3: `./mvnw -o test` — 337 tests run, 336 green, 1 error
+(`FlywayPostgresSchemaTest`, pre-existing Docker-daemon environment requirement, unrelated to any
+Round 3 change — confirmed by reading the test's own javadoc and by `docker info` hanging/failing in
+this sandbox); `npm run lint` — 0 errors (4 pre-existing warnings, unrelated files); `npm run build`
+— success; `npx vitest run` — 21/21 green (6 files, unchanged). New/updated test files: 6 backend
+(`ImportBatchApplyServiceTest`, `LargeCatalogMatchingTest`, `SupplierSourceAdminServiceTest` [new],
+`CloudPaymentsServiceTest`, `BillingControllerTest`) — new migration `V29`.
 
 ## Verified facts from repository
 
@@ -576,13 +604,23 @@ historical continuity, do not reopen without a new measured reason:**
 
 ## Next action
 
-Both hardening rounds are complete and verified on the current working tree (uncommitted — see
-below): Prompt 00-10 (первый раунд, `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §§1-5, ADR-001…010)
-and the second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021, table above).
-Current full-suite verification: `./mvnw -o test` — 325/325 green (49 classes); `./mvnw -o package
--DskipTests` — success; `npm run lint` — 0 errors; `npm run build` — success; `npx vitest run` —
-21/21 green. `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` updated (§1 build/test gate, §6
-resolved/remaining limitations) to reflect this second round.
+All three rounds are complete and verified on the current working tree (uncommitted — see below):
+Prompt 00-10 (первый раунд, `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §§1-5, ADR-001…010), the
+second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021), and the third
+"six user-reported bugs" round (ADR-022…027, table above). Current full-suite verification:
+`./mvnw -o test` — 337 tests run, 336 green, 1 error (`FlywayPostgresSchemaTest`, Docker-only,
+pre-existing environment limitation — see Round 3 note above); `npm run lint` — 0 errors;
+`npm run build` — success; `npx vitest run` — 21/21 green. `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md`
+updated (§1 build/test gate, §2 Round 3 findings, §6 resolved/remaining limitations) to reflect this
+third round.
+
+**Important correction to the record**: Round 2 declared several of these exact areas (FULL snapshot
+reconciliation, article matching, candidate search limit, autoApply safety gates, CloudPayments
+HMAC/billing authorization) "resolved" — Round 3 proves those resolutions were each incomplete in a
+specific, reproducible way. Do not treat any "Resolved" marker in this file or in
+`docs/DECISIONS.md` as proof of absence of bugs — treat it as "no *known* open issue as of that
+ADR," and prefer independent reproduction over re-reading a prior self-review when stakes are high
+(money, cross-tenant data, automated catalog changes).
 
 Прежде чем включать `autoApply=true` для реального поставщика, перепроверить накопленные
 ограничения — актуальный полный список теперь `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §6
