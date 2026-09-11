@@ -102,6 +102,24 @@ changed this round, so the frontend build/lint/test results from Round 3 stand u
 New/updated test files: `LargeCatalogMatchingTest`, `SupplierSourceAdminServiceTest`,
 `CloudPaymentsServiceTest`, `BillingControllerTest`.
 
+## Fifth round: ADR-028's own bugs 2/3 fixes were themselves still incomplete (2026-09-11)
+
+A third user review of commit `18cd492` confirmed Round 4's fixes for bugs 4 and 5 (senderAllowlist
+enforcement; billing fail-closed + platform-admin restriction), but reproduced sharper, more
+targeted repros showing Round 4's fixes for bugs 2 and 3 were themselves still incomplete. Full
+detail — `docs/DECISIONS.md` ADR-029.
+
+| # | Bug (as reported) | Root cause | Fix |
+| --- | --- | --- | --- |
+| 2 (2nd follow-up) | A "Chanel Coco Mademoiselle 100 ml" row still auto-matches `EXACT` onto an existing, never-linked "Chanel No 5 100 ml" product — two DIFFERENT products of the SAME brand sharing a coincidental article | Round 4's `brandsConfirmIdentity` only rejects CROSS-brand collisions; `CriticalAttributeConflictChecker` never compares the product name/line text, only volume/concentration/shade/tester/set, so two same-brand/same-volume-but-different-line products show zero conflicts | `resolveViaExactSupplierArticle` now ALSO requires the row's computed `fingerprint` (which encodes `line`, i.e. the name text) to exactly equal the candidate's — "Coco Mademoiselle" vs "No 5" now produces different fingerprints and is rejected |
+| 3 (2nd follow-up) | 305 "Chanel Coco … 50 ml" filler products + a specific "Chanel No 5 100 ml" (#306) still excluded from candidates, despite Round 4's per-significant-token search + relevance ranking | Every individual fetch query stayed bounded by `PageRequest.of(0, candidateFetchLimit)` BEFORE ranking; a short numeric token like "5" matches "50" as a substring, flooding the bounded query with ~300 unrelated fillers ahead of the target in id order, so ranking-after-truncation still couldn't guarantee survival | New `DeterministicMatchResolver#resolveViaSafeFingerprint` now runs an UNBOUNDED (no `Pageable`/limit), brand-scoped query (`ProductRepository#findAllByShopIdAndBrandTokenIn`) BEFORE the bounded fuzzy search runs at all — an exact fingerprint match can never be hidden by any candidate-fetch-limit or ranking heuristic again |
+
+Verified after Round 5: `./mvnw -o test` — 349 tests run, 348 green, 1 error (same pre-existing
+`FlywayPostgresSchemaTest` Docker-daemon requirement, unaffected by this round). No frontend files
+changed this round, so the frontend build/lint/test results from Round 3 stand unchanged.
+New/updated test files: `LargeCatalogMatchingTest` (2 new regression tests reproducing the exact
+new repros), `ProductRepository` (new unbounded query method).
+
 ## Verified facts from repository
 
 - Backend: Spring Boot `3.1.5`, Java release `21`; audit runtime —

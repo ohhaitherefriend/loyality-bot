@@ -277,4 +277,65 @@ class LargeCatalogMatchingTest {
                 "a same-brand article match against a never-linked legacy product must still "
                         + "resolve as EXACT");
     }
+
+    /**
+     * ADR-029: closes the gap the brand-identity check (ADR-028) left open - two DIFFERENT products
+     * of the SAME brand ("Coco Mademoiselle" vs "No 5") sharing a coincidental supplier article
+     * must never auto-match as EXACT just because brand agrees and
+     * {@link CriticalAttributeConflictChecker} finds no conflicting volume/concentration/shade/
+     * tester/set (it never compares the line/name text itself). Reproduced verbatim by the report:
+     * a "Chanel Coco Mademoiselle 100 ml" row matched an existing, never-linked "Chanel No 5 100
+     * ml" product as EXACT.
+     */
+    @Test
+    void sameBrandDifferentLineArticleCollision_isNeverAutoMatchedAsExact() {
+        Supplier supplierD = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier D").build());
+
+        Product noFive = productRepository.save(Product.builder()
+                .shopId(SHOP_ID).brand("Chanel").name("Chanel No 5 100 ml")
+                .supplierArticle("SHARED-ARTICLE-777").currency("RUB").build());
+        // Deliberately NO SupplierProductLink at all - a legacy manually catalogued product.
+        entityManager.flush();
+
+        NormalizedRowData cocoMademoiselleRow = normalizer.normalize(Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel Coco Mademoiselle 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SHARED-ARTICLE-777"));
+
+        MatchResolution resolution = matchResolver.resolve(SHOP_ID, supplierD.getId(), cocoMademoiselleRow);
+
+        assertFalse(resolution.isResolved() && noFive.getId().equals(resolution.matchedProductId()),
+                "a shared article number under the SAME brand must never auto-match two different "
+                        + "product lines ('Coco Mademoiselle' vs 'No 5') as EXACT");
+    }
+
+    /**
+     * ADR-029: reproduces the report's exact second scenario - 305 same-brand filler products
+     * (each containing the digit substrings "5"/"50" that previously diluted the bounded,
+     * ranked candidate pool past its limit) plus the real target already in the catalog. The
+     * target must still auto-resolve as EXACT via the new unbounded, brand-scoped safe-fingerprint
+     * stage - simply increasing {@code candidateFetchLimit} would not fix this, since the fix does
+     * not depend on any bounded query at all for this deterministic decision.
+     */
+    @Test
+    void brandWithMoreThan300Items_targetStillAutoMatchesExact_viaUnboundedSafeFingerprint() {
+        List<Product> filler = new ArrayList<>();
+        for (int i = 0; i < 305; i++) {
+            filler.add(Product.builder()
+                    .shopId(SHOP_ID).brand("Chanel").name("Chanel Coco Mademoiselle " + i + " 50 ml")
+                    .currency("RUB").build());
+        }
+        productRepository.saveAll(filler);
+        entityManager.flush();
+
+        NormalizedRowData row = normalizeRow("Chanel", "Chanel No 5 100 ml");
+
+        MatchResolution resolution = matchResolver.resolve(SHOP_ID, 999L, row);
+
+        assertTrue(resolution.isResolved(),
+                "the exact target must still auto-match even though its brand now has 306 products "
+                        + "and 305 of them contain noisy digit substrings ('50') overlapping the "
+                        + "target's own significant tokens ('5', '100')");
+        assertEquals(chanelProductId, resolution.matchedProductId());
+    }
 }

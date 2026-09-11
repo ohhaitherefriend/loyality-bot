@@ -8,7 +8,9 @@ import com.plstk.loyaltybot.repository.SupplierProductLinkRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Runs the deterministic matching stage order from docs/ARCHITECTURE.md §9.2/prompt 04 (Stage 4
@@ -18,9 +20,13 @@ import java.util.Optional;
  *   <li>exact, unique barcode against the catalog (no link needed)</li>
  *   <li>exact, unique {@code supplierArticle} against the catalog (no link needed - covers a
  *       supplier's very first batch against a product already catalogued with this same article by a
- *       legacy manual import)</li>
- *   <li>safe fingerprint against the catalog (exact structural match, no critical conflict)</li>
- *   <li>otherwise: top explainable fuzzy candidates, never auto-matched</li>
+ *       legacy manual import) AND a fingerprint-exact structural match (ADR-029: a shared article
+ *       number under the SAME brand but a DIFFERENT product line - e.g. "Coco Mademoiselle" vs "No
+ *       5" - must never auto-match just because brand and article coincide)</li>
+ *   <li>safe fingerprint against the ENTIRE brand-scoped catalog, unbounded by any candidate-fetch
+ *       limit (ADR-029: exact structural match, no critical conflict)</li>
+ *   <li>otherwise: top explainable fuzzy candidates (bounded, ranked, for human/AI review only),
+ *       never auto-matched</li>
  * </ol>
  * Ambiguity (duplicate barcode, more than one fingerprint match) or a critical conflict at any
  * deterministic stage always falls through to the next stage instead of guessing - a false match is
@@ -75,13 +81,16 @@ public class DeterministicMatchResolver {
             return articleMatch.get();
         }
 
-        List<ScoredCandidate> scored = candidateSearchService.search(shopId, row);
-
-        Optional<MatchResolution> fingerprintMatch = resolveViaSafeFingerprint(row, scored);
+        // ADR-029: this exact/unbounded check runs BEFORE the bounded fuzzy candidate search below,
+        // and does not depend on it at all - a genuinely exact (fingerprint-equal) match must never
+        // be missed just because a brand has more products than the fuzzy pool's page-size cap, or
+        // because a noisy short/numeric name token diluted that pool's relevance ranking.
+        Optional<MatchResolution> fingerprintMatch = resolveViaSafeFingerprint(shopId, row);
         if (fingerprintMatch.isPresent()) {
             return fingerprintMatch.get();
         }
 
+        List<ScoredCandidate> scored = candidateSearchService.search(shopId, row);
         return MatchResolution.unresolved(candidateSearchService.topCandidates(scored));
     }
 
@@ -152,8 +161,8 @@ public class DeterministicMatchResolver {
      * the same article string for two completely unrelated products is common, not a signal of
      * the same product. {@code Product.supplierArticle} is a single denormalized column (whichever
      * supplier most recently wrote it), so a bare {@code shopId + supplierArticle} lookup is
-     * effectively unscoped by supplier. Two independent safeguards are required before this is
-     * trusted, neither sufficient alone (see docs/DECISIONS.md ADR-023/ADR-028):
+     * effectively unscoped by supplier. Three independent safeguards are required before this is
+     * trusted, neither alone sufficient (see docs/DECISIONS.md ADR-023/ADR-028/ADR-029):
      * <ol>
      *   <li>if this candidate product is already linked (via {@link SupplierProductLink}) to a
      *       <em>different</em> supplier, the coincidental match is rejected outright - this alone
@@ -161,15 +170,24 @@ public class DeterministicMatchResolver {
      *       catalogued product), which is the gap ADR-028 closes;</li>
      *   <li>the row's own brand must match (exactly, or via {@link BrandAliasResolver}/{@link
      *       BrandNormalizer} transliteration) the candidate's catalog brand - a coincidental article
-     *       collision across two different brands (e.g. a Dior row against an existing Chanel
-     *       product with no link yet) is never trusted as "confirmed supplier+article identity"
-     *       just because the bare article string happens to match. Either side missing a brand
-     *       entirely means identity can't be confirmed either way, so the match is rejected rather
-     *       than assumed safe.</li>
+     *       collision across two different brands is never trusted as "confirmed supplier+article
+     *       identity" just because the bare article string happens to match;</li>
+     *   <li>the row's computed {@code fingerprint} must EXACTLY equal the candidate's - brand alone
+     *       is not enough: two DIFFERENT products of the SAME brand (e.g. "Chanel Coco Mademoiselle
+     *       100 ml" vs "Chanel No 5 100 ml") can share both brand and, coincidentally, a supplier
+     *       article number, with zero attributes {@link CriticalAttributeConflictChecker} would
+     *       flag as conflicting (the line/name text itself isn't a "critical attribute" it compares)
+     *       - only a fully-matching fingerprint (brand+line+volume+concentration+shade+tester+set)
+     *       confirms this is genuinely the same product, not merely the same brand and a coincidental
+     *       article (ADR-029, reproduced by the report). This is the "exact match of characteristics
+     *       and name" the user asked for as the alternative to trusting the bare article.</li>
      * </ol>
      */
     private Optional<MatchResolution> resolveViaExactSupplierArticle(String shopId, Long supplierId, NormalizedRowData row) {
         if (row.externalSku() == null || row.externalSku().isBlank()) {
+            return Optional.empty();
+        }
+        if (row.fingerprint() == null || row.fingerprint().isBlank()) {
             return Optional.empty();
         }
         List<Product> matches = productRepository.findAllByShopIdAndSupplierArticle(shopId, row.externalSku());
@@ -186,6 +204,9 @@ public class DeterministicMatchResolver {
         NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
         List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
         if (!conflicts.isEmpty()) {
+            return Optional.empty();
+        }
+        if (!row.fingerprint().equals(candidateAttributes.fingerprint())) {
             return Optional.empty();
         }
         return Optional.of(MatchResolution.resolved(candidate.getId(), MatchDecisionType.EXACT));
@@ -216,18 +237,43 @@ public class DeterministicMatchResolver {
         return brandAliasResolver.areAliases(shopId, rowBrand, candidateBrand);
     }
 
-    private Optional<MatchResolution> resolveViaSafeFingerprint(NormalizedRowData row, List<ScoredCandidate> scored) {
+    /**
+     * ADR-029 (six-bug hardening pass, second follow-up): previously ran against the bounded,
+     * ranked output of {@code candidateSearchService.search} - a large brand or a noisy short
+     * name token could dilute that bounded pool's relevance ranking enough that a genuinely
+     * fingerprint-exact product got truncated away before ever reaching this check (reproduced by
+     * the report: item #306 of a 305-item brand still missing from candidates despite multi-token
+     * search + ranking). This now runs its OWN unbounded, brand-scoped query
+     * ({@link ProductRepository#findAllByShopIdAndBrandTokenIn}, no page/limit at all) BEFORE the
+     * bounded fuzzy search ever runs, so an exact structural match can never be hidden by any
+     * candidate-fetch-limit or ranking heuristic - those remain solely a concern of the fuzzy/AI
+     * suggestion path for human review, not of this deterministic auto-match decision.
+     */
+    private Optional<MatchResolution> resolveViaSafeFingerprint(String shopId, NormalizedRowData row) {
         if (row.fingerprint() == null || row.fingerprint().isBlank()) {
             return Optional.empty();
         }
-        List<ScoredCandidate> fingerprintMatches = scored.stream()
-                .filter(c -> !c.hasConflicts())
-                .filter(c -> row.fingerprint().equals(c.candidateAttributes().fingerprint()))
+        if (row.brand() == null || row.brand().isBlank()) {
+            // No brand signal to scope an otherwise-unbounded catalog query by - falls through to
+            // the bounded fuzzy search instead of scanning the entire shop's catalog.
+            return Optional.empty();
+        }
+        Set<String> brandTokens = brandAliasResolver.expand(shopId, row.brand());
+        if (brandTokens.isEmpty()) {
+            return Optional.empty();
+        }
+        List<Product> brandCandidates = productRepository.findAllByShopIdAndBrandTokenIn(shopId, brandTokens);
+        List<Long> fingerprintMatches = brandCandidates.stream()
+                .map(p -> Map.entry(p.getId(), normalizer.normalizeProduct(p)))
+                .filter(e -> conflictChecker.findConflicts(row, e.getValue()).isEmpty())
+                .filter(e -> row.fingerprint().equals(e.getValue().fingerprint()))
+                .map(Map.Entry::getKey)
+                .distinct()
                 .toList();
         if (fingerprintMatches.size() != 1) {
             // 0 -> no safe fingerprint match; >1 -> ambiguous, never auto-pick one.
             return Optional.empty();
         }
-        return Optional.of(MatchResolution.resolved(fingerprintMatches.get(0).productId(), MatchDecisionType.EXACT));
+        return Optional.of(MatchResolution.resolved(fingerprintMatches.get(0), MatchDecisionType.EXACT));
     }
 }

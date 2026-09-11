@@ -2553,3 +2553,104 @@ ADR-023/024/025/026 — each fix from the first pass was real but incomplete:
    role** — same trade-off already accepted for the pre-existing `AdminApiController` platform-wide
    endpoints (ADR-020); this pass reuses that exact mechanism rather than introducing a new one.
 
+## ADR-029 — Six-bug hardening pass, third follow-up: ADR-028's own article/brand check and candidate-ranking fixes were themselves incomplete (2026-09-11)
+
+### Контекст
+
+A third user report, reviewing commit `18cd492` (the ADR-028 work), confirmed two of the four
+ADR-028 fixes (senderAllowlist-while-autoApply, billing/payment fail-closed + platform-admin
+restriction) but reproduced the other two ADR-028 fixes as still insufficient, with sharper,
+more targeted repros than the ADR-023/024 originals:
+
+1. **ADR-028's `brandsConfirmIdentity` gap**: it only rejects a *cross-brand* coincidental article
+   match (Dior vs Chanel). It does nothing when two DIFFERENT products of the *same* brand share a
+   coincidental article — reproduced exactly as reported: a "Chanel Coco Mademoiselle 100 ml" row
+   auto-matched as `EXACT` onto an existing, never-linked "Chanel No 5 100 ml" product, purely
+   because brand agreed and `CriticalAttributeConflictChecker` found no conflicting
+   volume/concentration/shade/tester/set (it never compares the line/name text itself — "Coco
+   Mademoiselle" vs "No 5" is invisible to it).
+2. **ADR-028's `significantTokens` + relevance-ranking gap**: every individual SQL fetch query
+   (`findByShopIdAndBrandTokenInAndNameToken`, `findByShopIdAndBrandTokenIn`,
+   `findByShopIdAndNameContainingIgnoreCase`) remained bounded by `PageRequest.of(0,
+   candidateFetchLimit)` *before* any ranking happened — ranking only reorders whatever already
+   survived each query's own bounded, id-ordered page window; it cannot rescue an item no query's
+   window included in the first place. Reproduced exactly as reported: 305 "Chanel Coco … 50 ml"
+   filler products (each containing the digit substring "5" as part of "50", matched by a naive
+   `LIKE '%5%'` search on the row's own significant token "5") plus the real target, "Chanel No 5
+   100 ml" (item #306) — the target's own `LIKE`-substring queries for "5" returned ~300 unrelated
+   fillers before the target (arbitrary id order) and hit the same page-size cap, while the
+   precise "100" token query alone wasn't enough to guarantee survival once merged and re-sorted
+   against a pool where many fillers tied on score via the noisy "5" match.
+
+Both reports explicitly reject their own most literal-sounding fix: brand agreement is not enough
+identity confirmation, and simply raising `candidateFetchLimit` does not fix a ranking-after-truncation
+architecture.
+
+### Решение
+
+1. **`DeterministicMatchResolver#resolveViaExactSupplierArticle`**: now ALSO requires the row's
+   computed `fingerprint` (brand+line+volume+unit+concentration+shade+tester+set, from
+   `RowAttributeNormalizer`) to be byte-for-byte equal to the candidate's fingerprint, in addition
+   to the existing different-supplier-link check (ADR-023) and `brandsConfirmIdentity` (ADR-028).
+   Fingerprint equality is a strictly stronger, positive identity signal than "brand agrees and no
+   recognized attribute conflicts" — it also encodes the `line` (the product name minus recognized
+   structured attributes), so "Coco Mademoiselle" and "No 5" produce different fingerprints and the
+   match is rejected, while a genuine same-name/same-brand/same-volume legacy-catalog match (the
+   scenario this stage exists for, per `exactArticleMatch_againstNeverLinkedProduct_stillResolves_whenBrandsAgree`)
+   still resolves, since its fingerprint is identical on both sides. `brandsConfirmIdentity` is kept
+   alongside as an alias-aware (not just literal-text) gate — no longer load-bearing on its own for
+   this specific bug, but still useful as a cheap first-pass, defense-in-depth check.
+2. **`DeterministicMatchResolver#resolveViaSafeFingerprint`**: completely re-architected. It
+   previously ran against the *bounded, ranked* output of `CandidateSearchService#search` (itself
+   bounded by `candidateFetchLimit`). It now runs its own query BEFORE that bounded search is even
+   invoked, via a new, genuinely UNBOUNDED repository method,
+   `ProductRepository#findAllByShopIdAndBrandTokenIn(shopId, brandTokens)` (no `Pageable`, no
+   `LIMIT` at all — scoped only by brand, via the existing `BrandAliasResolver#expand`, since brand
+   cardinality is a natural, much smaller boundary than the whole catalog). Every product under
+   that brand is normalized and compared by fingerprint equality in Java; a single unambiguous
+   match resolves `EXACT`, more than one falls through same as every other deterministic stage. A
+   blank row brand skips this stage entirely (falls through to the existing bounded fuzzy search)
+   rather than risk scanning a shop's entire unscoped catalog. Crucially, this exact-match decision
+   no longer depends AT ALL on `candidateFetchLimit`, on `significantTokens`, or on the bounded
+   fetcher's relevance ranking — those remain solely a concern of the fuzzy/AI candidate-suggestion
+   path (`CandidateSearchService#topCandidates`, for human/AI review), which is unchanged by this
+   ADR and still bounded on purpose for that purpose.
+3. `resolve()`'s stage order changed accordingly: the new unbounded safe-fingerprint check now runs
+   immediately after `resolveViaExactSupplierArticle` and BEFORE `candidateSearchService.search` is
+   called at all (previously the bounded search ran first, and the fingerprint check filtered its
+   already-truncated output).
+
+### Тесты
+
+- `LargeCatalogMatchingTest#sameBrandDifferentLineArticleCollision_isNeverAutoMatchedAsExact` (new)
+  reproduces the exact new repro: a never-linked "Chanel No 5 100 ml" product, a "Chanel Coco
+  Mademoiselle 100 ml" row with the same article string and the same brand — asserts it is never
+  auto-matched.
+- `LargeCatalogMatchingTest#brandWithMoreThan300Items_targetStillAutoMatchesExact_viaUnboundedSafeFingerprint`
+  (new) reproduces the exact new repro: 305 "Chanel Coco Mademoiselle {i} 50 ml" filler products
+  (each containing the noisy digit substring "5" via "50") plus the real "Chanel No 5 100 ml"
+  target — asserts the target still auto-resolves as `EXACT`.
+- All prior `LargeCatalogMatchingTest`, `ImportBatchMatchingServiceTest`,
+  `SupplierImportEndToEndTest`, `ImportBatchNormalizingServiceTest` cases (including every ADR-023/
+  024/028 regression test) still pass unchanged.
+- Full suite: 349 backend tests, 348 passed, 1 pre-existing Docker-only environment error
+  (`FlywayPostgresSchemaTest`, unrelated, requires a local Docker daemon this sandbox doesn't have).
+
+### Осознанные ограничения
+
+1. **The unbounded safe-fingerprint query is scoped by brand, not truly catalog-wide** — a row with
+   a blank/unparseable brand still falls back to the bounded fuzzy path and can, in principle, still
+   miss an exact match hidden past `candidateFetchLimit`. A brand is required to bound the query to
+   something smaller than "the entire shop's catalog" without a schema change (e.g. a persisted,
+   indexed fingerprint column with an unconditionally unbounded index lookup); this is deferred as
+   out of scope for this pass, and blank-brand rows are already the weakest signal in every stage of
+   this resolver.
+2. **A pathologically large single brand (tens of thousands of SKUs) makes this stage an O(brand
+   size) Java-side scan** instead of an O(1) indexed lookup — acceptable for the realistic cosmetics/
+   perfume catalog sizes this project targets (a few hundred to low thousands of SKUs per brand per
+   shop), but not a general solution for an arbitrarily large brand.
+3. **Fingerprint equality is still exact-string equality of normalized text** — two descriptions of
+   the truly same product that normalize to slightly different `line` text (e.g. one includes a
+   marketing suffix the other omits) still fall through to fuzzy/AI matching rather than
+   auto-resolving, by design (a false EXACT match is worse than an extra review step, per D-009).
+

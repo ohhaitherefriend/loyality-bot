@@ -67,6 +67,21 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
             @Param("shopId") String shopId, @Param("brandTokens") java.util.Collection<String> brandTokens, Pageable pageable);
 
     /**
+     * Six-bug hardening pass, second follow-up (ADR-029): UNBOUNDED (no {@code Pageable}/limit at
+     * all) brand-scoped pool for {@code DeterministicMatchResolver}'s safe-fingerprint stage. A
+     * brand with more products than {@code candidateFetchLimit} must never make a genuinely exact
+     * (fingerprint-equal) match unreachable just because a page-size cap happened to cut it off -
+     * unlike the fuzzy/AI candidate pool (deliberately bounded for performance, since a human or AI
+     * reviews it), an EXACT auto-match decision must see every same-brand product in the shop, not
+     * an artificially truncated page of them. Scoped by brand (not the whole catalog) to stay a
+     * reasonable bound in practice - brand cardinality per shop is normally far below total catalog
+     * size.
+     */
+    @Query("SELECT p FROM Product p WHERE p.shopId = :shopId AND LOWER(p.brand) IN :brandTokens")
+    List<Product> findAllByShopIdAndBrandTokenIn(
+            @Param("shopId") String shopId, @Param("brandTokens") java.util.Collection<String> brandTokens);
+
+    /**
      * Stage 4 candidate shortlist, step 2: a name-substring shortlist (portable {@code LIKE}, no
      * {@code pg_trgm} dependency) used to widen the pool beyond an exact/aliased brand match - e.g. a
      * supplier's typo'd brand ("Diorr") still surfaces the real catalog product when the row and
