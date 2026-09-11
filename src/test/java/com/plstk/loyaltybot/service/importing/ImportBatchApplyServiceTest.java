@@ -14,6 +14,7 @@ import com.plstk.loyaltybot.entity.importing.Supplier;
 import com.plstk.loyaltybot.entity.importing.SupplierOffer;
 import com.plstk.loyaltybot.entity.importing.SupplierProductLink;
 import com.plstk.loyaltybot.entity.importing.SupplierSource;
+import com.plstk.loyaltybot.repository.BrandAliasRepository;
 import com.plstk.loyaltybot.repository.ImportBatchRepository;
 import com.plstk.loyaltybot.repository.ImportFileRepository;
 import com.plstk.loyaltybot.repository.ImportRowRepository;
@@ -81,6 +82,8 @@ class ImportBatchApplyServiceTest {
     @Autowired
     private ImportBatchApplyService importBatchApplyService;
     @Autowired
+    private RowAttributeNormalizer rowAttributeNormalizer;
+    @Autowired
     private ObjectMapper objectMapper;
     @Autowired
     private EntityManager entityManager;
@@ -132,6 +135,66 @@ class ImportBatchApplyServiceTest {
         ImportRow row = onlyRow(batchId);
         assertEquals(ImportRowStatus.APPLIED, row.getStatus());
         assertEquals(product.getId(), row.getMatchedProduct().getId());
+    }
+
+    @Test
+    void newProduct_duplicateRowWithinSameBatch_reusesJustCreatedProduct_neverCreatesTwo() {
+        // ADR-030 (Section 5): two rows of the SAME apply batch, both decided NEW_PRODUCT during
+        // matching (matchedProduct == null), with an identical brand+fingerprint (e.g. a duplicate
+        // line in the supplier's own file) - the second row must reuse the product the first row
+        // just created within this same transaction, never create a sibling duplicate.
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        String sharedFingerprint = fingerprintFor("Nivea", "Nivea Cream 100 ml");
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        addRow(batchId, normalizedWithFingerprint("SKU-1", "100.00", "Nivea", sharedFingerprint), null, "Nivea Cream 100 ml");
+        addRow(batchId, normalizedWithFingerprint("SKU-2", "100.00", "Nivea", sharedFingerprint), null, "Nivea Cream 100 ml");
+        flushClear();
+
+        importBatchApplyService.applyNewly(batchId);
+        flushClear();
+
+        List<Product> products = productRepository.findAll();
+        assertEquals(1, products.size(), "a duplicate row for the same product identity must never create a second Product");
+
+        List<ImportRow> rows = importRowRepository.findByImportBatchId(batchId);
+        assertEquals(2, rows.size());
+        assertEquals(products.get(0).getId(), rows.get(0).getMatchedProduct().getId());
+        assertEquals(products.get(0).getId(), rows.get(1).getMatchedProduct().getId());
+    }
+
+    @Test
+    void newProduct_identicalFingerprintAlreadyAppliedByEarlierBatch_reusesExistingProduct_neverCreatesDuplicate() {
+        // ADR-030 (Section 5): the NEW_PRODUCT decision for a row is made during the earlier
+        // MATCHING stage, against the catalog as it existed then. If a DIFFERENT, independently
+        // decided batch (e.g. from a different supplier, or a retried duplicate submission) already
+        // applied and created an identical product by the time THIS batch's apply actually runs,
+        // apply-time re-verification must catch it and reuse the existing product instead of
+        // creating a duplicate that would otherwise silently double the catalog.
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        String sharedFingerprint = fingerprintFor("Nivea", "Nivea Cream 100 ml");
+
+        Long firstBatchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        addRow(firstBatchId, normalizedWithFingerprint("SKU-1", "100.00", "Nivea", sharedFingerprint), null, "Nivea Cream 100 ml");
+        flushClear();
+        importBatchApplyService.applyNewly(firstBatchId);
+        flushClear();
+        assertEquals(1, productRepository.findAll().size());
+        Long firstProductId = productRepository.findAll().get(0).getId();
+
+        Long secondBatchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        addRow(secondBatchId, normalizedWithFingerprint("SKU-2", "100.00", "Nivea", sharedFingerprint), null, "Nivea Cream 100 ml");
+        flushClear();
+        importBatchApplyService.applyNewly(secondBatchId);
+        flushClear();
+
+        List<Product> products = productRepository.findAll();
+        assertEquals(1, products.size(), "a second, independently-decided NEW_PRODUCT for an identical "
+                + "fingerprint must never create a duplicate once one already exists");
+        assertEquals(firstProductId, products.get(0).getId());
+
+        ImportRow secondRow = onlyRow(secondBatchId);
+        assertEquals(ImportRowStatus.APPLIED, secondRow.getStatus());
+        assertEquals(firstProductId, secondRow.getMatchedProduct().getId());
     }
 
     @Test
@@ -637,7 +700,33 @@ class ImportBatchApplyServiceTest {
         return new NormalizedRowData(
                 brand, "line", null, new BigDecimal("100"), "ml", null, null, false, false,
                 externalSku, barcode, price != null ? new BigDecimal(price) : null, stock,
-                (brand == null ? "" : brand.toLowerCase()) + " line", "fp-" + externalSku);
+                (brand == null ? "" : brand.toLowerCase()) + " line", "fp-" + externalSku,
+                RowAttributeNormalizer.NORMALIZATION_VERSION);
+    }
+
+    /**
+     * The REAL fingerprint {@link RowAttributeNormalizer} would compute for a catalog product with
+     * this brand+name - used so the ADR-030 apply-time re-verification tests below compare against
+     * exactly what {@link ImportBatchApplyWriter#resolveProduct} recomputes for the freshly-created
+     * {@code Product} (same brand/name), rather than an arbitrary literal that would never actually
+     * match the live algorithm's output.
+     */
+    private String fingerprintFor(String brand, String rawName) {
+        java.util.Map<String, String> raw = new java.util.HashMap<>();
+        raw.put(LayoutRuleDefinition.FIELD_BRAND, brand);
+        raw.put(LayoutRuleDefinition.FIELD_RAW_NAME, rawName);
+        return rowAttributeNormalizer.normalize(SHOP_A, raw).fingerprint();
+    }
+
+    /** Like {@link #normalized}, but with an explicit, independently-controlled fingerprint - used
+     * to simulate two DIFFERENT rows (different externalSku) that are nonetheless the SAME real
+     * product identity (ADR-030 Section 5 apply-time re-verification tests below). */
+    private NormalizedRowData normalizedWithFingerprint(String externalSku, String price, String brand, String fingerprint) {
+        return new NormalizedRowData(
+                brand, "line", null, new BigDecimal("100"), "ml", null, null, false, false,
+                externalSku, null, price != null ? new BigDecimal(price) : null, null,
+                (brand == null ? "" : brand.toLowerCase()) + " line", fingerprint,
+                RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 
     private ImportBatch reloadBatch(Long batchId) {
@@ -697,6 +786,26 @@ class ImportBatchApplyServiceTest {
         }
 
         @Bean
+        BrandNormalizer brandNormalizer() {
+            return new BrandNormalizer();
+        }
+
+        @Bean
+        BrandAliasResolver brandAliasResolver(BrandAliasRepository brandAliasRepository, BrandNormalizer brandNormalizer) {
+            return new BrandAliasResolver(brandAliasRepository, brandNormalizer);
+        }
+
+        @Bean
+        RowAttributeNormalizer rowAttributeNormalizer(BrandAliasResolver brandAliasResolver) {
+            return new RowAttributeNormalizer(brandAliasResolver);
+        }
+
+        @Bean
+        CriticalAttributeConflictChecker criticalAttributeConflictChecker() {
+            return new CriticalAttributeConflictChecker();
+        }
+
+        @Bean
         ImportBatchApplyWriter importBatchApplyWriter(
                 ImportBatchRepository importBatchRepository,
                 ImportRowRepository importRowRepository,
@@ -706,11 +815,14 @@ class ImportBatchApplyServiceTest {
                 ShopSettingsRepository shopSettingsRepository,
                 PricingService pricingService,
                 CatalogAvailabilityService catalogAvailabilityService,
-                ObjectMapper objectMapper) {
+                ObjectMapper objectMapper,
+                RowAttributeNormalizer rowAttributeNormalizer,
+                CriticalAttributeConflictChecker criticalAttributeConflictChecker,
+                BrandAliasResolver brandAliasResolver) {
             return new ImportBatchApplyWriter(
                     importBatchRepository, importRowRepository, productRepository, supplierOfferRepository,
                     supplierProductLinkRepository, shopSettingsRepository, pricingService, catalogAvailabilityService,
-                    objectMapper);
+                    objectMapper, rowAttributeNormalizer, criticalAttributeConflictChecker, brandAliasResolver);
         }
 
         @Bean

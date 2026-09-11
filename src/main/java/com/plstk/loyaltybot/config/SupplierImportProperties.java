@@ -264,6 +264,27 @@ public class SupplierImportProperties {
          * by {@code SpreadsheetParser} row validity - brand is the only additional completeness gate.
          */
         private boolean newProductRequireBrand = true;
+
+        /** ADR-030: backfill of already-persisted SupplierProductLink.fingerprint values after a normalization-algorithm version bump. */
+        private FingerprintBackfill fingerprintBackfill = new FingerprintBackfill();
+    }
+
+    /**
+     * ADR-030: {@code SupplierLinkFingerprintMigrationService} recomputes {@code
+     * SupplierProductLink.fingerprint}/{@code normalizationVersion} for links still on an older
+     * normalization algorithm version, so a fingerprint-algorithm change (e.g. making the brand
+     * component alias-canonical) never leaves already-learned links silently stale. Runs in small,
+     * bounded batches on a schedule - safe to leave enabled indefinitely (a fully-migrated shop is
+     * simply a fast no-op query every run) and safe to disable if an operator wants full manual
+     * control over when this recompute happens.
+     */
+    @Data
+    public static class FingerprintBackfill {
+        private boolean enabled = true;
+        /** Upper bound on links recomputed per scheduled run, to bound one run's DB/CPU work. */
+        private int batchSize = 200;
+        private long intervalMs = 60 * 60 * 1000L;
+        private long initialDelayMs = 90_000L;
     }
 
     /**

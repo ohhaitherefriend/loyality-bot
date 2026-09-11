@@ -4,16 +4,18 @@
 
 ## Current stage
 
-- Stage: `SIX_BUG_HARDENING_ROUND_3_COMPLETE`
-- Active work: a third, user-reported bug-hunting round — six substantial, independently-reproduced
-  correctness/security bugs found in the round-2-hardened pipeline (see `docs/DECISIONS.md`
-  ADR-022…027). Round 2 (Stage 1-10, ADR-011…021) and Round 1 (Prompt 00-10, ADR-001…010) sections
-  below are left as historical record, not rewritten.
-- Last verified: `./mvnw -o test` — 337 tests run, 336 green, 1 error (`FlywayPostgresSchemaTest` —
-  requires a local Docker daemon not available in this sandbox; pre-existing environment limitation,
-  unrelated to Round 3 changes — see ADR note under Round 3 below); `npm run lint` — 0 errors;
-  `npm run build` — success; `npx vitest run` — 21/21 green (6 files)
-- Updated at: `2026-09-10 13:00 +03:00`
+- Stage: `SIX_BUG_HARDENING_ROUND_6_COMPLETE`
+- Active work: a sixth follow-up round — ADR-030, closing a more precise alias-identity variant of
+  the same matching-fix class plus three related architectural gaps (search-completeness diagnostics,
+  apply-time duplicate-creation guard, per-batch brand re-fetch cost). Round 5 (ADR-029), Round 4
+  (ADR-028), Round 3 (ADR-022…027), Round 2 (Stage 1-10, ADR-011…021) and Round 1 (Prompt 00-10,
+  ADR-001…010) sections below are left as historical record, not rewritten.
+- Last verified: `./mvnw -o clean verify` (real run, this sandbox) — 360 tests run, 0 failures, 1
+  error (`FlywayPostgresSchemaTest` — requires a local Docker daemon not available in this sandbox;
+  pre-existing environment limitation, unrelated to this round's changes — see ADR-030 "Осознанные
+  ограничения"). Frontend not touched this round — no `npm`/`vitest` re-run performed; Round 3's
+  results for those stand.
+- Updated at: `2026-09-11 15:15 +03:00`
 - Uncommitted at time of writing — see "Next action" below for what's pending before a commit.
 
 ## Stage status
@@ -119,6 +121,34 @@ Verified after Round 5: `./mvnw -o test` — 349 tests run, 348 green, 1 error (
 changed this round, so the frontend build/lint/test results from Round 3 stand unchanged.
 New/updated test files: `LargeCatalogMatchingTest` (2 new regression tests reproducing the exact
 new repros), `ProductRepository` (new unbounded query method).
+
+## Sixth round: ADR-029's own fix was still alias-blind, plus three architectural gaps (2026-09-11)
+
+A fourth review of the ADR-029 work found a sharper, more precise variant of the exact same class of
+bug (fingerprint identity ignored configured brand aliases) plus three related gaps the earlier
+passes left open: no diagnostic distinguishing "genuinely new" from "search couldn't run" before
+auto-creating `NEW_PRODUCT`, no apply-time re-check against a possibly-changed catalog before
+creating that product, and a per-row (not per-batch) full-brand DB reload. Full detail —
+`docs/DECISIONS.md` ADR-030.
+
+| # | Issue (as reported) | Root cause | Fix |
+| --- | --- | --- | --- |
+| 1 | Alias-spelled row ("Channel No 5"/"Шанель No 5") still fails to match an existing, canonically-different-spelled catalog product ("Chanel No 5"), even with the shop's alias configured, once the brand has 300+ products | `RowAttributeNormalizer`'s fingerprint used the row's raw/literal brand text, not an alias-canonical identity — three different spellings produced three different fingerprints | `BrandAliasResolver#canonicalKey` (new) + brand-phrase stripping from the name before computing `line` — alias-configured spellings now fingerprint identically; fingerprint versioned (`NORMALIZATION_VERSION` 1→2) with a `SupplierProductLink.normalizationVersion` column (`V30`) + background backfill service |
+| 2 | Zero fuzzy candidates could mean either "genuinely new" or "the identity search itself never ran" (missing brand/fingerprint) — both auto-created `NEW_PRODUCT` identically | No diagnostic captured whether the unbounded exact-identity check (ADR-029) actually ran | New `SearchCompleteness` record threaded resolver → outcome → `ImportRow.candidateSearchDiagnostics` (`V31`, nullable) → `ImportBatchMatchingService`, which now requires `requiredStagesCompleted == true` (never assumed for legacy/missing rows) before auto-approving `NEW_PRODUCT` |
+| 3 | A `NEW_PRODUCT` decision (made at MATCHING time) could still create a duplicate `Product` if an identical item already existed by APPLY time (duplicate row in the same file, a different batch applied first, or a manual edit) | `ImportBatchApplyWriter#resolveProduct` created the product unconditionally whenever `matchedProduct == null`, with no re-check | New `reverifyStillNew` re-runs the unbounded brand-scoped fingerprint check against the current transactional DB state immediately before creating; a confirmed match is reused (never merged/deleted), an ambiguous result still creates-as-new rather than guessing |
+| 4 | A 300+-item brand in one import file caused the same brand to be re-fetched from the DB and re-normalized on EVERY row of that brand within the batch | `resolveViaSafeFingerprint` had no batch-scoped cache (unlike the fuzzy-candidate fetcher, which already had one) | New per-shop, per-brand `ConcurrentHashMap` cache in `DeterministicMatchResolver`, evicted by the existing `startNewBatch` call |
+
+Verified after Round 6: `./mvnw -o clean verify` (real run, this sandbox) — **360 tests, 0 failures,
+1 error** (`FlywayPostgresSchemaTest`, same pre-existing Docker-daemon requirement, unaffected by
+this round). No frontend files changed this round. New/updated test files: `RowAttributeNormalizerTest`
+(alias-identity, cross-shop isolation, versioning, backward-compat JSON), `LargeCatalogMatchingTest`
+(corrected-fixture alias repro, ambiguous-duplicate scenario), `ImportBatchMatchingServiceTest`
+(search-completeness gating, legacy/missing-diagnostics safety), `ImportBatchApplyServiceTest`
+(apply-time duplicate guard, both within-batch and across-batches). New migrations: `V30`
+(`supplier_product_links.normalization_version`), `V31` (`import_rows.candidate_search_diagnostics`)
+— both simple additive `ALTER TABLE ... ADD COLUMN`, consistent with every prior migration in this
+series, but **only exercised via H2 in this session** — see ADR-030 "Осознанные ограничения" for the
+explicit Docker/Testcontainers-Postgres and real-supplier-file gaps this round could not close.
 
 ## Verified facts from repository
 
@@ -641,15 +671,27 @@ historical continuity, do not reopen without a new measured reason:**
 
 ## Next action
 
-All three rounds are complete and verified on the current working tree (uncommitted — see below):
+All six rounds are complete and verified on the current working tree (uncommitted — see below):
 Prompt 00-10 (первый раунд, `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §§1-5, ADR-001…010), the
-second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021), and the third
-"six user-reported bugs" round (ADR-022…027, table above). Current full-suite verification:
-`./mvnw -o test` — 337 tests run, 336 green, 1 error (`FlywayPostgresSchemaTest`, Docker-only,
-pre-existing environment limitation — see Round 3 note above); `npm run lint` — 0 errors;
-`npm run build` — success; `npx vitest run` — 21/21 green. `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md`
-updated (§1 build/test gate, §2 Round 3 findings, §6 resolved/remaining limitations) to reflect this
-third round.
+second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021), the third
+"six user-reported bugs" round (ADR-022…027), the fourth/fifth/sixth follow-up rounds closing
+progressively sharper repros of the same fix areas (ADR-028/029/030, tables above). Current
+full-suite verification: `./mvnw -o clean verify` (real run, this sandbox) — 360 tests, 0 failures,
+1 error (`FlywayPostgresSchemaTest`, Docker-only, pre-existing environment limitation — see ADR-030
+"Осознанные ограничения"); frontend not touched since Round 3, so its `npm run lint`/`npm run
+build`/`npx vitest run` results stand from that round, not re-verified this round.
+`docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` still reflects Round 3's §1/§2/§6 update — **not yet
+updated for Rounds 4-6**; treat its automation-rate/findings sections as stale until refreshed.
+
+**Explicitly unverified this round (per the task's own instruction not to present mocked/H2 results
+as proof of a real-Postgres/real-supplier scenario)**: (a) `V30`/`V31` against a real PostgreSQL
+instance with Flyway enabled — this sandbox has no running Docker daemon
+(`docker ps` → "Cannot connect to the Docker daemon"); (b) the real supplier file
+(`imports/price-25-06.xlsx`, referenced by the workspace rule) is not present in this workspace,
+so the IMAP→XLSX→APPLIED path was only exercised against synthetic fixtures
+(`SupplierImportEndToEndTest`) and a real-protocol-but-not-live IMAP exchange
+(`ImapMailboxClientGreenMailTest`, against an in-process GreenMail server). Both gaps must be closed
+against real infrastructure before the first live supplier's `autoApply=true` is trusted.
 
 **Important correction to the record**: Round 2 declared several of these exact areas (FULL snapshot
 reconciliation, article matching, candidate search limit, autoApply safety gates, CloudPayments

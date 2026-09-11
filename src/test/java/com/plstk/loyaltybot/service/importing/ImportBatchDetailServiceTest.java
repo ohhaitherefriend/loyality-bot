@@ -227,7 +227,8 @@ class ImportBatchDetailServiceTest {
     private NormalizedRowData normalized(String externalSku, String brand, String price) {
         return new NormalizedRowData(
                 brand, "line", null, new BigDecimal("100"), "ml", null, null, false, false,
-                externalSku, null, new BigDecimal(price), 5, brand.toLowerCase() + " line", "fp-" + externalSku);
+                externalSku, null, new BigDecimal(price), 5, brand.toLowerCase() + " line", "fp-" + externalSku,
+                RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 
     private ImportRow reload(Long rowId) {

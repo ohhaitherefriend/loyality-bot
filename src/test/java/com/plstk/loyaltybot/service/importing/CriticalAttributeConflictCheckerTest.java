@@ -73,6 +73,6 @@ class CriticalAttributeConflictCheckerTest {
             BigDecimal volumeValue, String volumeUnit, String concentration, String shade, boolean tester, boolean set) {
         return new NormalizedRowData(
                 "Brand", "Line", null, volumeValue, volumeUnit, concentration, shade, tester, set,
-                null, null, null, null, "brand line", "fp");
+                null, null, null, null, "brand line", "fp", RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 }

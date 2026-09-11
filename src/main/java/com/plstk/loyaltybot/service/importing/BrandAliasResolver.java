@@ -101,6 +101,28 @@ public class BrandAliasResolver {
         return result;
     }
 
+    /**
+     * ADR-030: the canonical, shop-scoped identity key for {@code brand} - the configured alias
+     * group's canonical spelling (normalized) if one exists for this shop, otherwise the brand's own
+     * normalized form. Unlike {@link #areAliases}/{@link #expand} (search-widening signals only, per
+     * this class' own javadoc), this IS meant to be trusted as an identity component: "Chanel",
+     * "Channel" and "Шанель" (all configured aliases of the same canonical brand for this shop) all
+     * return the SAME key, so {@link RowAttributeNormalizer}'s fingerprint can treat them as the same
+     * product identity instead of three different ones just because of spelling. Two different shops
+     * with the same raw alias configured to different canonical brands (or one shop having no alias
+     * configured at all) get different/no grouping - this never leaks across shops.
+     */
+    public String canonicalKey(String shopId, String brand) {
+        if (shopId == null || brand == null) {
+            return null;
+        }
+        String normalized = brandNormalizer.normalize(brand);
+        if (normalized == null || normalized.isEmpty()) {
+            return normalized;
+        }
+        return indexFor(shopId).getOrDefault(normalized, normalized);
+    }
+
     private Map<String, String> indexFor(String shopId) {
         return indexByShop.computeIfAbsent(shopId, this::buildIndex);
     }

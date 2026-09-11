@@ -649,8 +649,8 @@ class SupplierImportEndToEndTest {
         // ----- normalizing -----
 
         @Bean
-        RowAttributeNormalizer rowAttributeNormalizer() {
-            return new RowAttributeNormalizer();
+        RowAttributeNormalizer rowAttributeNormalizer(BrandAliasResolver brandAliasResolver) {
+            return new RowAttributeNormalizer(brandAliasResolver);
         }
 
         @Bean
@@ -811,11 +811,14 @@ class SupplierImportEndToEndTest {
                 com.plstk.loyaltybot.repository.ShopSettingsRepository shopSettingsRepository,
                 PricingService pricingService,
                 CatalogAvailabilityService catalogAvailabilityService,
-                ObjectMapper objectMapper) {
+                ObjectMapper objectMapper,
+                RowAttributeNormalizer normalizer,
+                CriticalAttributeConflictChecker conflictChecker,
+                BrandAliasResolver brandAliasResolver) {
             return new ImportBatchApplyWriter(
                     importBatchRepository, importRowRepository, productRepository, supplierOfferRepository,
                     supplierProductLinkRepository, shopSettingsRepository, pricingService, catalogAvailabilityService,
-                    objectMapper);
+                    objectMapper, normalizer, conflictChecker, brandAliasResolver);
         }
 
         @Bean

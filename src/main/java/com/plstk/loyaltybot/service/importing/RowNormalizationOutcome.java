@@ -13,6 +13,7 @@ public record RowNormalizationOutcome(
         ImportRow row,
         String normalizedDataJson,
         String candidateSearchResultJson,
+        String candidateSearchDiagnosticsJson,
         ImportRowStatus status,
         Long matchedProductId,
         MatchDecisionType decisionType) {
@@ -22,11 +23,13 @@ public record RowNormalizationOutcome(
         ImportRowStatus status = decisionType == MatchDecisionType.LEARNED
                 ? ImportRowStatus.LEARNED_MATCH
                 : ImportRowStatus.EXACT_MATCH;
-        return new RowNormalizationOutcome(row, normalizedDataJson, null, status, matchedProductId, decisionType);
+        return new RowNormalizationOutcome(row, normalizedDataJson, null, null, status, matchedProductId, decisionType);
     }
 
-    public static RowNormalizationOutcome unresolved(ImportRow row, String normalizedDataJson, String candidateSearchResultJson) {
+    public static RowNormalizationOutcome unresolved(
+            ImportRow row, String normalizedDataJson, String candidateSearchResultJson, String candidateSearchDiagnosticsJson) {
         return new RowNormalizationOutcome(
-                row, normalizedDataJson, candidateSearchResultJson, ImportRowStatus.PENDING, null, null);
+                row, normalizedDataJson, candidateSearchResultJson, candidateSearchDiagnosticsJson,
+                ImportRowStatus.PENDING, null, null);
     }
 }

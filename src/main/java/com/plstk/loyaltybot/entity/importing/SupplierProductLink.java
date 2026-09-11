@@ -53,6 +53,21 @@ public class SupplierProductLink {
     @Column(length = 512)
     private String fingerprint;
 
+    /**
+     * ADR-030: которая версия {@code RowAttributeNormalizer.NORMALIZATION_VERSION} произвела
+     * ТЕКУЩЕЕ значение {@link #fingerprint}. Смена алгоритма fingerprint (например, чтобы бренд
+     * учитывал настроенные алиасы) меняет саму строку для одного и того же товара - без этой
+     * версии старая связь либо продолжила бы молча сравниваться со свежими fingerprint по
+     * буквальному совпадению (что почти всегда ложно после смены формата), либо потребовала бы
+     * рискованного in-place backfill без возможности отличить "уже пересчитано" от "ещё нет".
+     * {@code SupplierLinkFingerprintMigrationService} пересчитывает {@link #fingerprint} и эту
+     * версию для всех связей со старой версией, используя ТЕКУЩИЙ каталог и алиасы магазина -
+     * старые связи не остаются молча нерабочими, а безопасно обновляются.
+     */
+    @Column(nullable = false)
+    @Builder.Default
+    private Integer normalizationVersion = 1;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 16)
     @Builder.Default

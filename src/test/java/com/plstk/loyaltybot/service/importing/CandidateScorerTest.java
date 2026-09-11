@@ -70,6 +70,6 @@ class CandidateScorerTest {
             String concentration, String shade, boolean tester, boolean set) {
         return new NormalizedRowData(
                 brand, "line", null, volumeValue, volumeUnit, concentration, shade, tester, set,
-                null, null, null, null, searchName, "fp");
+                null, null, null, null, searchName, "fp", RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 }

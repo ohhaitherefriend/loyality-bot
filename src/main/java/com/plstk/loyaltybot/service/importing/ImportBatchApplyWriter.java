@@ -62,6 +62,9 @@ public class ImportBatchApplyWriter {
     private final PricingService pricingService;
     private final CatalogAvailabilityService catalogAvailabilityService;
     private final ObjectMapper objectMapper;
+    private final RowAttributeNormalizer normalizer;
+    private final CriticalAttributeConflictChecker conflictChecker;
+    private final BrandAliasResolver brandAliasResolver;
 
     /** @return true if this call won the AUTO_APPROVED/APPROVED -&gt; APPLYING claim. */
     @Transactional
@@ -255,12 +258,31 @@ public class ImportBatchApplyWriter {
      * their freshly-created active offer is taken into account below, exactly like any other
      * newly-reactivated product, so "a valid new product automatically appears" holds without a
      * separate code path.
+     *
+     * <p>ADR-030 (Section 5): the {@code NEW_PRODUCT} decision was made during the earlier MATCHING
+     * stage, against the catalog as it existed AT THAT TIME - by the time apply actually runs, an
+     * identical product may already exist because (a) a different row of THIS SAME batch (a
+     * duplicate line in the supplier's own file) already created it earlier in this very loop, (b)
+     * a different, already-applied batch (same or another supplier) created it first, or (c) it was
+     * added manually. {@link #reverifyStillNew} re-runs the exact same unbounded, brand-scoped
+     * fingerprint check {@code DeterministicMatchResolver#resolveViaSafeFingerprint} used, but
+     * against the CURRENT DB state inside this transaction (so it also sees this same transaction's
+     * own not-yet-committed inserts from earlier rows) - a confirmed identical match is reused
+     * instead of creating a duplicate; never merged/deleted, only reused going forward.
      */
     private Product resolveProduct(String shopId, ImportRow row, NormalizedRowData normalized) {
         if (row.getMatchedProduct() != null) {
             Long productId = row.getMatchedProduct().getId();
             return productRepository.findByShopIdAndId(shopId, productId)
                     .orElseThrow(() -> new IllegalStateException("Matched product " + productId + " not found"));
+        }
+        Optional<Product> reverified = reverifyStillNew(shopId, normalized);
+        if (reverified.isPresent()) {
+            log.warn("ImportRow {} was decided NEW_PRODUCT during matching, but product {} with an identical "
+                            + "fingerprint now exists (created concurrently/since then) - reusing it instead of "
+                            + "creating a duplicate",
+                    row.getId(), reverified.get().getId());
+            return reverified.get();
         }
         Map<String, String> raw = readRaw(row);
         String rawName = raw.get(LayoutRuleDefinition.FIELD_RAW_NAME);
@@ -300,6 +322,34 @@ public class ImportBatchApplyWriter {
     }
 
     /**
+     * Deliberately NOT cached across rows/calls (unlike {@code DeterministicMatchResolver}'s
+     * batch-scoped cache during matching): this must always see the CURRENT transactional state,
+     * including a product this very apply loop just inserted for an earlier duplicate row, so a
+     * stale in-memory snapshot could never hide a same-batch duplicate from itself. NEW_PRODUCT
+     * rows are the minority of an apply batch, so the extra per-row query cost here is bounded.
+     */
+    private Optional<Product> reverifyStillNew(String shopId, NormalizedRowData normalized) {
+        if (normalized.brand() == null || normalized.brand().isBlank()
+                || normalized.fingerprint() == null || normalized.fingerprint().isBlank()) {
+            return Optional.empty();
+        }
+        Set<String> brandTokens = brandAliasResolver.expand(shopId, normalized.brand());
+        if (brandTokens.isEmpty()) {
+            return Optional.empty();
+        }
+        List<Product> matches = productRepository.findAllByShopIdAndBrandTokenIn(shopId, brandTokens).stream()
+                .filter(p -> conflictChecker.findConflicts(normalized, normalizer.normalizeProduct(shopId, p)).isEmpty())
+                .filter(p -> normalized.fingerprint().equals(normalizer.normalizeProduct(shopId, p).fingerprint()))
+                .toList();
+        if (matches.size() != 1) {
+            // 0 -> genuinely still new; >1 -> ambiguous, never auto-pick one (create-as-new is still
+            // safer here than guessing which of several existing products to attach to).
+            return Optional.empty();
+        }
+        return Optional.of(matches.get(0));
+    }
+
+    /**
      * Refreshes/creates the {@code SupplierProductLink} that lets the next batch from the same
      * supplier skip AI entirely for this row (D-006/ADR-004 step 1). No-op when the row has neither
      * a stable {@code externalSku} nor {@code barcode} - a fingerprint-only match has nothing
@@ -330,6 +380,11 @@ public class ImportBatchApplyWriter {
             link.setBarcode(barcode);
         }
         link.setFingerprint(normalized.fingerprint());
+        // ADR-030: `normalized` was just computed fresh by the current RowAttributeNormalizer, so
+        // it always carries the CURRENT algorithm version - a link written here is never "stale",
+        // only links persisted before this versioning existed need the separate backfill service.
+        link.setNormalizationVersion(normalized.normalizationVersion() != null
+                ? normalized.normalizationVersion() : RowAttributeNormalizer.NORMALIZATION_VERSION);
         if (link.getConfirmedSource() == null) {
             link.setConfirmedSource(LinkConfirmationSource.AUTOMATIC);
         }

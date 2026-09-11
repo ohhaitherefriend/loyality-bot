@@ -173,7 +173,7 @@ class ImportBatchNormalizingServiceTest {
     }
 
     @Test
-    void chanelShanelChannel_fuzzyCandidate_taggedBrandAlias_neverAutoMatched() {
+    void chanelShanelChannel_configuredAlias_autoMatchesViaSafeFingerprint() {
         // Mirrors the default group V26 seeds for existing shops - this shop starts with an empty
         // brand_aliases table (no Flyway in tests), so the group is seeded explicitly here.
         seedChanelAliasGroup();
@@ -189,11 +189,14 @@ class ImportBatchNormalizingServiceTest {
         entityManager.clear();
 
         ImportRow row = onlyRow(batchId);
-        assertEquals(ImportRowStatus.PENDING, row.getStatus(),
-                "misspelled brand must never be treated as an identical fingerprint match");
-        assertNull(row.getMatchedProduct());
-        assertTrue(row.getCandidateSearchResult().contains("brandAlias"));
-        assertTrue(row.getCandidateSearchResult().contains("\"productId\":" + chanel.getId()));
+        // ADR-030: "Channel" is a shop-CONFIGURED alias of "Chanel" (not merely a fuzzy/typo
+        // signal) - once the fingerprint (alias-canonical brand + line + volume/concentration/
+        // shade/tester/set) fully agrees too, this is trusted as the SAME product identity and
+        // auto-resolves as EXACT_MATCH, instead of only ever surfacing as a fuzzy "brandAlias"
+        // candidate for human/AI review (the pre-ADR-030 behavior this test used to assert).
+        assertEquals(ImportRowStatus.EXACT_MATCH, row.getStatus(),
+                "a shop-configured brand alias with a fully-agreeing fingerprint must auto-resolve");
+        assertEquals(chanel.getId(), row.getMatchedProduct().getId());
     }
 
     @Test
@@ -355,8 +358,8 @@ class ImportBatchNormalizingServiceTest {
         }
 
         @Bean
-        RowAttributeNormalizer rowAttributeNormalizer() {
-            return new RowAttributeNormalizer();
+        RowAttributeNormalizer rowAttributeNormalizer(BrandAliasResolver brandAliasResolver) {
+            return new RowAttributeNormalizer(brandAliasResolver);
         }
 
         @Bean

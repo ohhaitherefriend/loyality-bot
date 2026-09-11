@@ -127,9 +127,9 @@ class ImportBatchMatchingServiceTest {
     }
 
     @Test
-    void pendingRow_noCandidates_brandPresent_becomesAutoApprovedNewProduct() {
+    void pendingRow_noCandidates_brandPresent_completeSearch_becomesAutoApprovedNewProduct() {
         Long batchId = createBatch();
-        addRow(batchId, ImportRowStatus.PENDING, normalized("Nivea", true), null);
+        addRow(batchId, ImportRowStatus.PENDING, normalized("Nivea", true), null, completeDiagnostics());
         entityManager.flush();
         entityManager.clear();
 
@@ -149,7 +149,7 @@ class ImportBatchMatchingServiceTest {
     @Test
     void pendingRow_noCandidates_brandMissing_becomesNeedsReview() {
         Long batchId = createBatch();
-        addRow(batchId, ImportRowStatus.PENDING, normalized(null, true), null);
+        addRow(batchId, ImportRowStatus.PENDING, normalized(null, true), null, completeDiagnostics());
         entityManager.flush();
         entityManager.clear();
 
@@ -161,6 +161,49 @@ class ImportBatchMatchingServiceTest {
         assertEquals(ImportRowStatus.NEEDS_REVIEW, row.getStatus());
         assertNull(row.getMatchedProduct());
         assertEquals(0, fakeAiCatalogMatcher.callCount());
+    }
+
+    @Test
+    void pendingRow_noCandidates_missingSearchDiagnostics_legacyRowNeverAutoCreatesNewProduct() {
+        // ADR-030: a row persisted before candidateSearchDiagnostics existed (or otherwise missing
+        // it) must be treated as "unknown completeness", never silently trusted as "search was
+        // complete", even though brand is present and there are zero fuzzy candidates.
+        Long batchId = createBatch();
+        addRow(batchId, ImportRowStatus.PENDING, normalized("Nivea", true), null, null);
+        entityManager.flush();
+        entityManager.clear();
+
+        importBatchMatchingService.matchBatch(batchId);
+        entityManager.flush();
+        entityManager.clear();
+
+        ImportRow row = onlyRow(batchId);
+        assertEquals(ImportRowStatus.NEEDS_REVIEW, row.getStatus());
+        assertNull(row.getMatchedProduct());
+        List<MatchDecision> decisions = matchDecisionRepository.findByImportRowId(row.getId());
+        assertTrue(decisions.get(0).getReason().contains("search completeness unknown"));
+    }
+
+    @Test
+    void pendingRow_noCandidates_incompleteSearch_becomesNeedsReview_notAutoApprovedNewProduct() {
+        // ADR-030: the row itself lacked enough signal (e.g. no fingerprint) for the required
+        // unbounded exact-identity check to run at all - zero fuzzy candidates here proves
+        // nothing, so this must never be auto-created as a NEW_PRODUCT.
+        Long batchId = createBatch();
+        addRow(batchId, ImportRowStatus.PENDING, normalized("Nivea", true), null,
+                toJson(SearchCompleteness.incomplete("missing fingerprint", RowAttributeNormalizer.NORMALIZATION_VERSION)));
+        entityManager.flush();
+        entityManager.clear();
+
+        importBatchMatchingService.matchBatch(batchId);
+        entityManager.flush();
+        entityManager.clear();
+
+        ImportRow row = onlyRow(batchId);
+        assertEquals(ImportRowStatus.NEEDS_REVIEW, row.getStatus());
+        assertNull(row.getMatchedProduct());
+        List<MatchDecision> decisions = matchDecisionRepository.findByImportRowId(row.getId());
+        assertTrue(decisions.get(0).getReason().contains("incomplete"));
     }
 
     @Test
@@ -390,7 +433,7 @@ class ImportBatchMatchingServiceTest {
         return new NormalizedRowData(
                 brand, "line", null, new BigDecimal("100"), "ml", null, null, false, false,
                 "SKU-1", null, withPrice ? new BigDecimal("100.00") : null, null,
-                brand == null ? "line" : (brand + " line").toLowerCase(), "fp");
+                brand == null ? "line" : (brand + " line").toLowerCase(), "fp", RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 
     private ScoredCandidate scoredCandidate(Long productId, String score, List<String> conflicts) {
@@ -433,6 +476,11 @@ class ImportBatchMatchingServiceTest {
     }
 
     private ImportRow addRow(Long batchId, ImportRowStatus status, NormalizedRowData normalized, List<ScoredCandidate> candidates) {
+        return addRow(batchId, status, normalized, candidates, completeDiagnostics());
+    }
+
+    private ImportRow addRow(Long batchId, ImportRowStatus status, NormalizedRowData normalized,
+            List<ScoredCandidate> candidates, String candidateSearchDiagnosticsJson) {
         ImportBatch batch = importBatchRepository.findById(batchId).orElseThrow();
         ImportRow row = importRowRepository.save(ImportRow.builder()
                 .shopId(SHOP_A)
@@ -442,10 +490,15 @@ class ImportBatchMatchingServiceTest {
                 .rawData("{}")
                 .normalizedData(toJson(normalized))
                 .candidateSearchResult(candidates == null || candidates.isEmpty() ? null : toJson(candidates))
+                .candidateSearchDiagnostics(candidateSearchDiagnosticsJson)
                 .status(status)
                 .build());
         entityManager.flush();
         return row;
+    }
+
+    private String completeDiagnostics() {
+        return toJson(SearchCompleteness.completed(RowAttributeNormalizer.NORMALIZATION_VERSION));
     }
 
     private ImportRow onlyRow(Long batchId) {

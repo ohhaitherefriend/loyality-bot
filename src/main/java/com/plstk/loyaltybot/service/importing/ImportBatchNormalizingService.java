@@ -66,7 +66,7 @@ public class ImportBatchNormalizingService {
 
     private RowNormalizationOutcome processRow(String shopId, Long supplierId, ImportRow row) {
         Map<String, String> rawValues = readRawValues(row.getRawData());
-        NormalizedRowData normalized = normalizer.normalize(rawValues);
+        NormalizedRowData normalized = normalizer.normalize(shopId, rawValues);
         String normalizedJson = toJson(normalized);
 
         MatchResolution resolution = matchResolver.resolve(shopId, supplierId, normalized);
@@ -76,7 +76,8 @@ public class ImportBatchNormalizingService {
         }
 
         String candidatesJson = resolution.candidates().isEmpty() ? null : toJson(resolution.candidates());
-        return RowNormalizationOutcome.unresolved(row, normalizedJson, candidatesJson);
+        String diagnosticsJson = toJson(resolution.completeness());
+        return RowNormalizationOutcome.unresolved(row, normalizedJson, candidatesJson, diagnosticsJson);
     }
 
     private Map<String, String> readRawValues(String rawDataJson) {

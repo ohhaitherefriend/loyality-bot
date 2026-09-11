@@ -234,7 +234,7 @@ class ImportRowReviewServiceTest {
     private String normalizedJson(String price) {
         NormalizedRowData data = new NormalizedRowData(
                 "Brand", "line", null, new BigDecimal("100"), "ml", null, null, false, false,
-                "SKU-1", null, new BigDecimal(price), 5, "brand line", "fp-1");
+                "SKU-1", null, new BigDecimal(price), 5, "brand line", "fp-1", RowAttributeNormalizer.NORMALIZATION_VERSION);
         try {
             return objectMapper.writeValueAsString(data);
         } catch (Exception e) {

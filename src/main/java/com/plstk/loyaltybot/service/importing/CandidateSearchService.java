@@ -51,7 +51,7 @@ public class CandidateSearchService {
         List<Product> fetched = candidateFetcher.fetchCandidates(shopId, row, cfg.getCandidateFetchLimit());
 
         return fetched.stream()
-                .map(product -> scorer.score(shopId, product.getId(), product.getName(), row, normalizer.normalizeProduct(product)))
+                .map(product -> scorer.score(shopId, product.getId(), product.getName(), row, normalizer.normalizeProduct(shopId, product)))
                 .sorted(Comparator.comparing(ScoredCandidate::totalScore).reversed())
                 .toList();
     }

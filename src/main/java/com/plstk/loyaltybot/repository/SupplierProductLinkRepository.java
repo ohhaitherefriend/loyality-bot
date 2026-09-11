@@ -1,6 +1,7 @@
 package com.plstk.loyaltybot.repository;
 
 import com.plstk.loyaltybot.entity.importing.SupplierProductLink;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
@@ -35,4 +36,16 @@ public interface SupplierProductLinkRepository extends JpaRepository<SupplierPro
      * be equal (docs/DECISIONS.md ADR-023).
      */
     boolean existsByShopIdAndProductIdAndSupplierIdNot(String shopId, Long productId, Long supplierId);
+
+    /**
+     * ADR-030 backfill source: every link still carrying a fingerprint computed by an OLDER
+     * normalization algorithm version, oldest id first (stable, resumable paging across scheduled
+     * runs on a large table) - see {@code SupplierLinkFingerprintMigrationService}. Only links that
+     * actually HAVE a fingerprint/product need recomputation; a link with neither is unaffected by
+     * any fingerprint-algorithm change.
+     */
+    List<SupplierProductLink> findByNormalizationVersionLessThanAndFingerprintIsNotNullAndProductIsNotNullOrderByIdAsc(
+            int normalizationVersion, Pageable pageable);
+
+    long countByNormalizationVersionLessThanAndFingerprintIsNotNullAndProductIsNotNull(int normalizationVersion);
 }

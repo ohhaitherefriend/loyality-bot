@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Runs the deterministic matching stage order from docs/ARCHITECTURE.md §9.2/prompt 04 (Stage 4
@@ -43,6 +44,20 @@ public class DeterministicMatchResolver {
     private final BrandNormalizer brandNormalizer;
     private final BrandAliasResolver brandAliasResolver;
 
+    /**
+     * Section 3 hardening: {@link #resolveViaSafeFingerprint} is deliberately unbounded (queries
+     * and re-normalizes every product of the row's brand), which is correct for one row but, before
+     * this cache, meant a brand with 300+ products got re-fetched from the DB AND re-normalized in
+     * full for EVERY row of a large same-brand import batch (e.g. 300 rows x 300 products = ~90k
+     * redundant normalizations for one file). Keyed by (shopId, brandTokens) since that's the only
+     * input that determines the fetched+normalized set; evicted per shop at the start of every
+     * batch by {@link #startNewBatch} - same lifecycle as {@link CandidateSearchService#startNewBatch}
+     * and {@link SimpleProductCandidateFetcher}'s own cache, so alias/catalog changes between
+     * batches are never served stale.
+     */
+    private final ConcurrentHashMap<BrandCacheKey, List<Map.Entry<Long, NormalizedRowData>>> brandFingerprintCache =
+            new ConcurrentHashMap<>();
+
     public DeterministicMatchResolver(
             SupplierProductLinkRepository supplierProductLinkRepository,
             ProductRepository productRepository,
@@ -63,6 +78,7 @@ public class DeterministicMatchResolver {
     /** See {@link CandidateSearchService#startNewBatch} - call once per shop before this batch's row loop. */
     public void startNewBatch(String shopId) {
         candidateSearchService.startNewBatch(shopId);
+        brandFingerprintCache.keySet().removeIf(key -> key.shopId().equals(shopId));
     }
 
     public MatchResolution resolve(String shopId, Long supplierId, NormalizedRowData row) {
@@ -91,7 +107,28 @@ public class DeterministicMatchResolver {
         }
 
         List<ScoredCandidate> scored = candidateSearchService.search(shopId, row);
-        return MatchResolution.unresolved(candidateSearchService.topCandidates(scored));
+        return MatchResolution.unresolved(candidateSearchService.topCandidates(scored), completeness(row));
+    }
+
+    /**
+     * ADR-030: {@link #resolveViaSafeFingerprint} is UNBOUNDED (no candidate-fetch-limit at all)
+     * once it actually runs - so "did it run" (had a usable brand + fingerprint) is precisely "was
+     * the required exact-identity check complete" for this row. This does NOT depend on how many
+     * fuzzy candidates were found - zero fuzzy candidates with a completed exact-identity check is
+     * a legitimately safe signal for {@code NEW_PRODUCT}; zero fuzzy candidates WITHOUT one is not.
+     */
+    private SearchCompleteness completeness(NormalizedRowData row) {
+        if (row.fingerprint() == null || row.fingerprint().isBlank()) {
+            return SearchCompleteness.incomplete(
+                    "row fingerprint could not be computed (name did not parse into any structured attributes)",
+                    RowAttributeNormalizer.NORMALIZATION_VERSION);
+        }
+        if (row.brand() == null || row.brand().isBlank()) {
+            return SearchCompleteness.incomplete(
+                    "row has no brand - the unbounded exact-identity catalog check could not be scoped",
+                    RowAttributeNormalizer.NORMALIZATION_VERSION);
+        }
+        return SearchCompleteness.completed(RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 
     private Optional<MatchResolution> resolveViaSupplierProductLink(String shopId, Long supplierId, NormalizedRowData row) {
@@ -141,7 +178,7 @@ public class DeterministicMatchResolver {
             return Optional.empty();
         }
         Product candidate = matches.get(0);
-        NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
+        NormalizedRowData candidateAttributes = normalizer.normalizeProduct(shopId, candidate);
         List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
         if (!conflicts.isEmpty()) {
             return Optional.empty();
@@ -201,7 +238,7 @@ public class DeterministicMatchResolver {
         if (!brandsConfirmIdentity(shopId, row.brand(), candidate.getBrand())) {
             return Optional.empty();
         }
-        NormalizedRowData candidateAttributes = normalizer.normalizeProduct(candidate);
+        NormalizedRowData candidateAttributes = normalizer.normalizeProduct(shopId, candidate);
         List<String> conflicts = conflictChecker.findConflicts(row, candidateAttributes);
         if (!conflicts.isEmpty()) {
             return Optional.empty();
@@ -262,9 +299,12 @@ public class DeterministicMatchResolver {
         if (brandTokens.isEmpty()) {
             return Optional.empty();
         }
-        List<Product> brandCandidates = productRepository.findAllByShopIdAndBrandTokenIn(shopId, brandTokens);
-        List<Long> fingerprintMatches = brandCandidates.stream()
-                .map(p -> Map.entry(p.getId(), normalizer.normalizeProduct(p)))
+        List<Map.Entry<Long, NormalizedRowData>> normalizedBrandCandidates = brandFingerprintCache.computeIfAbsent(
+                new BrandCacheKey(shopId, brandTokens),
+                key -> productRepository.findAllByShopIdAndBrandTokenIn(key.shopId(), key.brandTokens()).stream()
+                        .map(p -> Map.entry(p.getId(), normalizer.normalizeProduct(key.shopId(), p)))
+                        .toList());
+        List<Long> fingerprintMatches = normalizedBrandCandidates.stream()
                 .filter(e -> conflictChecker.findConflicts(row, e.getValue()).isEmpty())
                 .filter(e -> row.fingerprint().equals(e.getValue().fingerprint()))
                 .map(Map.Entry::getKey)
@@ -275,5 +315,8 @@ public class DeterministicMatchResolver {
             return Optional.empty();
         }
         return Optional.of(MatchResolution.resolved(fingerprintMatches.get(0), MatchDecisionType.EXACT));
+    }
+
+    private record BrandCacheKey(String shopId, Set<String> brandTokens) {
     }
 }

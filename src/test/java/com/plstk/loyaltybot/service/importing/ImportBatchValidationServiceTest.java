@@ -287,7 +287,8 @@ class ImportBatchValidationServiceTest {
     private NormalizedRowData normalized(String externalSku, String barcode, String price) {
         return new NormalizedRowData(
                 "Brand", "line", null, new BigDecimal("100"), "ml", null, null, false, false,
-                externalSku, barcode, new BigDecimal(price), null, "brand line", "fp-" + externalSku);
+                externalSku, barcode, new BigDecimal(price), null, "brand line", "fp-" + externalSku,
+                RowAttributeNormalizer.NORMALIZATION_VERSION);
     }
 
     private ImportBatch reloadBatch(Long batchId) {

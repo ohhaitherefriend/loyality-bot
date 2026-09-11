@@ -56,6 +56,7 @@ public class ImportBatchNormalizeWriter {
             ImportRow row = outcome.row();
             row.setNormalizedData(outcome.normalizedDataJson());
             row.setCandidateSearchResult(outcome.candidateSearchResultJson());
+            row.setCandidateSearchDiagnostics(outcome.candidateSearchDiagnosticsJson());
             row.setStatus(outcome.status());
 
             if (outcome.matchedProductId() != null) {

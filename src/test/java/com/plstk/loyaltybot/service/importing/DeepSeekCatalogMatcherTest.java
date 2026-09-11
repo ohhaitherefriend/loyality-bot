@@ -42,7 +42,8 @@ class DeepSeekCatalogMatcherTest {
     private final AiMatchRequest request = new AiMatchRequest(
             "row-1",
             new NormalizedRowData("Chanel", "No 5", null, new BigDecimal("100"), "ml", null, null, false, false,
-                    "SKU-1", null, new BigDecimal("100.00"), null, "chanel no 5 100 ml", "chanel|no 5|100|ml||"),
+                    "SKU-1", null, new BigDecimal("100.00"), null, "chanel no 5 100 ml", "chanel|no 5|100|ml||",
+                    RowAttributeNormalizer.NORMALIZATION_VERSION),
             List.of());
 
     @BeforeEach

@@ -48,7 +48,7 @@ class LargeCatalogMatchingTest {
     @Autowired
     private EntityManager entityManager;
 
-    private final RowAttributeNormalizer normalizer = new RowAttributeNormalizer();
+    private RowAttributeNormalizer normalizer;
     private CandidateSearchService candidateSearchService;
     private DeterministicMatchResolver matchResolver;
 
@@ -59,6 +59,7 @@ class LargeCatalogMatchingTest {
     void setUp() {
         BrandNormalizer brandNormalizer = new BrandNormalizer();
         BrandAliasResolver brandAliasResolver = new BrandAliasResolver(brandAliasRepository, brandNormalizer);
+        normalizer = new RowAttributeNormalizer(brandAliasResolver);
         ProductCandidateFetcher fetcher = new SimpleProductCandidateFetcher(productRepository, brandAliasResolver, brandNormalizer);
         CandidateScorer scorer = new CandidateScorer(brandAliasResolver, new CriticalAttributeConflictChecker());
         SupplierImportProperties properties = new SupplierImportProperties();
@@ -108,18 +109,28 @@ class LargeCatalogMatchingTest {
         assertEquals(chanelProductId, resolution.matchedProductId());
     }
 
+    /**
+     * ADR-030: "Channel" is a CONFIGURED alias of "Chanel" for {@code SHOP_ID} (see {@code setUp}) -
+     * unlike a merely transliteration-similar or typo'd brand (still handled conservatively, see
+     * {@code diorTypo_diorr_...}/{@code diorCyrillicTransliteration_...} below, which only ever
+     * surface as fuzzy candidates), an explicitly configured alias combined with full attribute
+     * agreement (fingerprint) IS trusted as the same product identity. This intentionally reverses
+     * this test's PRE-ADR-030 expectation (renamed from
+     * {@code channelMisspelling_surfacesChanelAsFuzzyCandidate_neverAutoMatched}) - the report's
+     * whole point was that a shop-configured brand alias must not be treated as "just a fuzzy
+     * signal for human review" once the rest of the product's identity (line/volume/concentration/
+     * shade/tester/set) fully agrees too.
+     */
     @Test
-    void channelMisspelling_surfacesChanelAsFuzzyCandidate_neverAutoMatched() {
+    void channelConfiguredAlias_autoMatchesViaSafeFingerprint_notMerelyAFuzzyCandidate() {
         NormalizedRowData row = normalizeRow("Channel", "Channel No 5 100 ml");
 
         MatchResolution resolution = matchResolver.resolve(SHOP_ID, 999L, row);
 
-        assertTrue(!resolution.isResolved(), "a misspelled brand must never be auto-matched, only offered as a candidate");
-        assertTrue(resolution.candidates().stream().anyMatch(c -> c.productId().equals(chanelProductId)),
-                "Chanel must still be found as a fuzzy candidate for a 'Channel'-branded row");
-        assertTrue(resolution.candidates().stream()
-                .filter(c -> c.productId().equals(chanelProductId))
-                .anyMatch(c -> c.matchedAttributes().contains("brandAlias")));
+        assertTrue(resolution.isResolved(),
+                "a shop-configured brand alias ('Channel' -> 'Chanel') with a fully-agreeing "
+                        + "fingerprint must auto-match, not merely surface as a fuzzy candidate");
+        assertEquals(chanelProductId, resolution.matchedProductId());
     }
 
     @Test
@@ -153,7 +164,7 @@ class LargeCatalogMatchingTest {
     }
 
     private NormalizedRowData normalizeRow(String brand, String name) {
-        return normalizer.normalize(Map.of(
+        return normalizer.normalize(SHOP_ID, Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, brand,
                 LayoutRuleDefinition.FIELD_RAW_NAME, name));
     }
@@ -208,7 +219,7 @@ class LargeCatalogMatchingTest {
                 .confirmedSource(LinkConfirmationSource.AUTOMATIC).build());
         entityManager.flush();
 
-        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(Map.of(
+        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(SHOP_ID, Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, "Dior",
                 LayoutRuleDefinition.FIELD_RAW_NAME, "Dior Sauvage 100 ml",
                 LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SAME-ARTICLE-123"));
@@ -239,7 +250,7 @@ class LargeCatalogMatchingTest {
         // legacy manual import, never through the supplier-import pipeline.
         entityManager.flush();
 
-        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(Map.of(
+        NormalizedRowData diorRowFromSupplierB = normalizer.normalize(SHOP_ID, Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, "Dior",
                 LayoutRuleDefinition.FIELD_RAW_NAME, "Dior Sauvage 100 ml",
                 LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SAME-ARTICLE-999"));
@@ -266,7 +277,7 @@ class LargeCatalogMatchingTest {
                 .supplierArticle("LEGACY-ARTICLE-1").currency("RUB").build());
         entityManager.flush();
 
-        NormalizedRowData chanelRowFromSupplierC = normalizer.normalize(Map.of(
+        NormalizedRowData chanelRowFromSupplierC = normalizer.normalize(SHOP_ID, Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, "Chanel",
                 LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No 5 100 ml",
                 LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "LEGACY-ARTICLE-1"));
@@ -297,7 +308,7 @@ class LargeCatalogMatchingTest {
         // Deliberately NO SupplierProductLink at all - a legacy manually catalogued product.
         entityManager.flush();
 
-        NormalizedRowData cocoMademoiselleRow = normalizer.normalize(Map.of(
+        NormalizedRowData cocoMademoiselleRow = normalizer.normalize(SHOP_ID, Map.of(
                 LayoutRuleDefinition.FIELD_BRAND, "Chanel",
                 LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel Coco Mademoiselle 100 ml",
                 LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "SHARED-ARTICLE-777"));
@@ -337,5 +348,94 @@ class LargeCatalogMatchingTest {
                         + "and 305 of them contain noisy digit substrings ('50') overlapping the "
                         + "target's own significant tokens ('5', '100')");
         assertEquals(chanelProductId, resolution.matchedProductId());
+    }
+
+    /**
+     * ADR-030: the confirmed defect report, reproduced verbatim in an ISOLATED shop namespace
+     * (never touches {@code SHOP_ID}'s shared fixtures, so there is no risk of an unrelated
+     * pre-existing "Chanel No 5 100 ml" causing a spurious ambiguous-match rejection). Critically,
+     * per the report's own correction: the target product is created LAST, strictly AFTER all 305
+     * same-brand filler products - the adversarial position for any id-ordered/paginated search,
+     * unlike a target created first in {@code @BeforeEach} (which would trivially survive even a
+     * naive {@code ORDER BY id LIMIT N} query and mask the real bug).
+     */
+    @Test
+    void aliasSpellingVariant_pastBrandLimit_findsExistingProduct_noAmbiguityOrDuplicate() {
+        String shopId = "shop-alias-repro";
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(shopId).canonicalBrand("Chanel").alias("Chanel").normalizedAlias("chanel").build());
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(shopId).canonicalBrand("Chanel").alias("Channel").normalizedAlias("channel").build());
+        brandAliasRepository.save(BrandAlias.builder()
+                .shopId(shopId).canonicalBrand("Chanel").alias("Шанель").normalizedAlias("шанель").build());
+
+        List<Product> filler = new ArrayList<>();
+        for (int i = 0; i < 305; i++) {
+            filler.add(Product.builder()
+                    .shopId(shopId).brand("Chanel").name("Chanel Coco " + i + " 50 ml").currency("RUB").build());
+        }
+        productRepository.saveAll(filler);
+        entityManager.flush();
+
+        // The target - created LAST, strictly after every same-brand filler above.
+        Long targetId = productRepository.save(Product.builder()
+                .shopId(shopId).brand("Chanel").name("Chanel No 5 100 ml").currency("RUB").build()).getId();
+        entityManager.flush();
+        long productCountBeforeMatching = productRepository.count();
+
+        NormalizedRowData channelRow = normalizer.normalize(shopId, Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Channel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Channel No 5 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "FRESH-SUPPLIER-SKU-1"));
+        MatchResolution channelResolution = matchResolver.resolve(shopId, 4242L, channelRow);
+        assertTrue(channelResolution.isResolved(),
+                "'Channel No 5 100 ml' (configured alias spelling) must resolve to the existing product, "
+                        + "not fall through to a NEW_PRODUCT candidate, even past a 305-item same-brand catalog");
+        assertEquals(targetId, channelResolution.matchedProductId());
+
+        NormalizedRowData shanelRow = normalizer.normalize(shopId, Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Шанель",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Шанель No 5 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "FRESH-SUPPLIER-SKU-2"));
+        MatchResolution shanelResolution = matchResolver.resolve(shopId, 4242L, shanelRow);
+        assertTrue(shanelResolution.isResolved(),
+                "'Шанель No 5 100 ml' (Cyrillic configured alias spelling) must resolve to the existing "
+                        + "product too, not fall through to a NEW_PRODUCT candidate");
+        assertEquals(targetId, shanelResolution.matchedProductId());
+
+        assertEquals(productCountBeforeMatching, productRepository.count(),
+                "resolving matches must never itself create/duplicate a catalog product");
+    }
+
+    /**
+     * Section 6 regression table: when the catalog itself already contains MORE THAN ONE product
+     * with a fully-agreeing (structurally identical) fingerprint - e.g. a historical duplicate-data
+     * situation - the unbounded safe-fingerprint stage must treat this as ambiguous and refuse to
+     * auto-pick either one ({@code DeterministicMatchResolver#resolveViaSafeFingerprint} falls
+     * through instead of guessing), surfacing both only as fuzzy candidates for a human/AI review
+     * decision - never an arbitrary silent pick of "whichever one the query happened to return first".
+     */
+    @Test
+    void multipleStructurallyIdenticalCatalogProducts_areNeverAutoPicked_surfacedForReviewInstead() {
+        String shopId = "shop-ambiguous-duplicate";
+        Long duplicateA = productRepository.save(Product.builder()
+                .shopId(shopId).brand("Nivea").name("Nivea Cream 100 ml").currency("RUB").build()).getId();
+        Long duplicateB = productRepository.save(Product.builder()
+                .shopId(shopId).brand("Nivea").name("Nivea Cream 100 ml").currency("RUB").build()).getId();
+        entityManager.flush();
+        long productCountBeforeMatching = productRepository.count();
+
+        NormalizedRowData row = normalizer.normalize(shopId, Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Nivea",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Nivea Cream 100 ml"));
+        MatchResolution resolution = matchResolver.resolve(shopId, 999L, row);
+
+        assertFalse(resolution.isResolved(),
+                "two catalog products with an identical fingerprint must never be auto-resolved to either one");
+        assertTrue(resolution.candidates().stream().anyMatch(c -> c.productId().equals(duplicateA))
+                        && resolution.candidates().stream().anyMatch(c -> c.productId().equals(duplicateB)),
+                "both structurally-identical products must still be surfaced as candidates for human/AI review");
+        assertEquals(productCountBeforeMatching, productRepository.count(),
+                "an ambiguous match must never itself create a NEW_PRODUCT duplicate either");
     }
 }

@@ -2654,3 +2654,146 @@ architecture.
    marketing suffix the other omits) still fall through to fuzzy/AI matching rather than
    auto-resolving, by design (a false EXACT match is worse than an extra review step, per D-009).
 
+## ADR-030 — ADR-029 follow-up: alias-canonical identity, search-completeness diagnostics, apply-time re-verification (2026-09-11)
+
+### Контекст
+
+A fourth report, again reviewing the ADR-029 work, found a new, more precise variant of the same
+underlying class of bug plus three related architectural gaps the earlier passes left open:
+
+1. **Alias-blind fingerprint**: `RowAttributeNormalizer` computed the fingerprint's brand
+   component from the row's raw/literal brand text, not an alias-canonical identity. A shop with
+   `Chanel`/`Channel`/`Шанель` configured as the same canonical brand (`BrandAlias`) still produced
+   THREE different fingerprints for the same product spelled three ways, so `resolveViaSafeFingerprint`
+   (ADR-029) never found a match for an alias-spelled row against a canonically-different-spelled
+   catalog entry — reproduced with 305 same-brand filler products plus a "Chanel No 5 100 ml" target
+   created LAST (highest id in its brand), followed by an incoming "Channel No 5 100 ml" / "Шанель No 5
+   100 ml" row (new supplier article, no barcode).
+2. **No search-completeness diagnostic**: "zero candidates" and "zero candidates because the row had
+   no usable brand/fingerprint to search with at all" were indistinguishable by the time
+   `ImportBatchMatchingService` decided `NEW_PRODUCT` — both looked identical (empty candidate list),
+   so a row whose identity search never actually ran could still be auto-created as new.
+3. **No apply-time re-verification / duplicate guard**: a `NEW_PRODUCT` decision made during MATCHING
+   was never re-checked against the catalog's state at APPLY time — a duplicate row within the same
+   file, an independently-decided batch that got applied first, or a manual catalog edit in between
+   could all result in a second, duplicate `Product` for what is really the same item.
+4. **Per-row full-brand reload**: `resolveViaSafeFingerprint` re-queried and re-normalized every
+   product of the row's brand on EVERY row, with no batch-scoped cache — a 300+-item brand in a
+   large import file meant repeating the same DB fetch + normalization hundreds of times per batch.
+
+### Решение
+
+1. **Alias-canonical fingerprint identity** — `BrandAliasResolver#canonicalKey(shopId, brand)` (new):
+   returns the shop's configured alias group's canonical normalized spelling, or the brand's own
+   normalized form if unconfigured. Deliberately does NOT fall back to transliteration (unlike
+   `expand()`/`areAliases()`, which remain search-widening-only signals) — an unconfigured
+   Cyrillic/Latin pair (e.g. `Dior`/`Диор`) is never trusted as identity, only an explicitly
+   configured `BrandAlias` row is. `RowAttributeNormalizer#extract` now (a) uses `canonicalKey` for
+   the fingerprint's brand component instead of the raw brand text, and (b) strips every known alias
+   spelling of the row's brand out of the free-text name (word-boundary-safe, via a per-alias regex —
+   never a blind substring replace) BEFORE computing `line`, so `"Channel No 5"` and `"Chanel No 5"`
+   both reduce to the line `"No 5"`. `Product.brand()`/the row's own `brand()` field are still always
+   preserved exactly as seen — only the internal fingerprint is alias-aware.
+2. **Fingerprint normalization versioning** — `RowAttributeNormalizer.NORMALIZATION_VERSION` (bumped
+   1 → 2) is embedded as the fingerprint's own literal prefix (`"v2:..."`), so an old fingerprint can
+   never silently compare equal/unequal against a new-algorithm one. `SupplierProductLink` gained a
+   `normalizationVersion` column (Flyway `V30`, default `1` for every pre-existing row) and a new
+   `SupplierLinkFingerprintMigrationService` (`@Scheduled`, batched, per-link-transactional, isolated
+   failure handling) backfills stale links to the current algorithm in the background — an old link
+   is never silently treated as "already correct" nor does it block indefinitely.
+3. **Search-completeness diagnostics threaded end-to-end** — new `SearchCompleteness` record
+   (`requiredStagesCompleted`, `reason`, `normalizationVersion`): `DeterministicMatchResolver`
+   computes it (`completed` only when the row had both a non-blank fingerprint AND brand, i.e. the
+   UNBOUNDED brand-scoped fingerprint check from ADR-029 actually ran) and returns it on
+   `MatchResolution.unresolved(...)`. `ImportBatchNormalizingService`/`RowNormalizationOutcome` carry
+   it through as `candidateSearchDiagnosticsJson`, and `ImportBatchNormalizeWriter.finalizeSuccess`
+   persists it onto a new `ImportRow.candidateSearchDiagnostics` column (Flyway `V31`, nullable —
+   every pre-existing row has `NULL` here). `ImportBatchMatchingService.evaluateNewProductOrReview`
+   now requires BOTH the pre-existing brand-present gate AND
+   `completeness.requiredStagesCompleted() == true` before auto-approving `NEW_PRODUCT`;
+   `SearchCompleteness.isUnknown(null)` (a legacy row with no diagnostic, or a row whose JSON failed to
+   parse) is treated as "incomplete", NEVER as "complete" — such a row now routes to `NEEDS_REVIEW`
+   with an explicit reason instead of being silently auto-created.
+4. **Apply-time re-verification (never auto-merge/delete)** — `ImportBatchApplyWriter#resolveProduct`,
+   before creating a `NEW_PRODUCT`, now re-runs the same unbounded brand-scoped fingerprint check
+   against the CURRENT transactional DB state via a new `reverifyStillNew` helper. Deliberately NOT
+   cached (unlike the matching-time cache below): it must see this same transaction's own
+   not-yet-committed inserts from earlier rows in the same apply loop, so a duplicate row within one
+   file is caught and reused rather than creating a sibling. A single unambiguous existing match is
+   reused (never merged/deleted — only the newly-arriving row is pointed at the pre-existing product);
+   an ambiguous result (>1 match) is treated the same as every other deterministic stage — never
+   auto-picked, falls through to creating the (still safe, by construction) new product rather than
+   guessing which of several existing ones to attach to.
+5. **Batch-scoped cache for the brand-fingerprint check** — `DeterministicMatchResolver` gained a
+   `ConcurrentHashMap<(shopId, brandTokens), List<(productId, NormalizedRowData)>>` cache for
+   `resolveViaSafeFingerprint`, populated once per distinct brand and reused across every row of that
+   brand for the rest of the batch; evicted per shop by `startNewBatch` (called once per shop before
+   the row loop, same lifecycle as `CandidateSearchService`/`SimpleProductCandidateFetcher`'s own
+   per-batch caches). This is safe because MATCHING never creates products itself (that only happens
+   later, in APPLY) — so there is no risk of a stale cache hiding a product created earlier in the
+   same run.
+
+### Тесты
+
+- `RowAttributeNormalizerTest#configuredBrandAlias_producesIdenticalFingerprint_acrossSpellings`,
+  `#brandStripping_neverMergesDifferentLines_evenWithConfiguredAliases` (word-boundary safety),
+  `#configuredBrandAlias_neverLeaksAcrossShops` (Section 6 cross-shop isolation),
+  `#fingerprintIsVersioned_asALiteralPrefix`,
+  `#legacyJsonWithoutNormalizationVersion_deserializesWithNullVersion` (backward-compat JSON).
+- `LargeCatalogMatchingTest#aliasSpellingVariant_pastBrandLimit_findsExistingProduct_noAmbiguityOrDuplicate`
+  reproduces the exact new repro with the corrected fixture order (305 same-brand fillers created
+  BEFORE the target, target created LAST) — asserts both `"Channel No 5 100 ml"` and `"Шанель No 5 100
+  ml"` resolve to the existing product and `productRepository.count()` never changes.
+  `#channelConfiguredAlias_autoMatchesViaSafeFingerprint_notMerelyAFuzzyCandidate` (renamed/rewritten:
+  the intentional PRE→POST behavior reversal, now asserting a configured alias DOES safely
+  auto-match, not merely surface as a fuzzy candidate) and
+  `#diorCyrillicTransliteration_matchesWithoutAnyConfiguredAlias` (unconfigured transliteration alone
+  still stays conservative) together confirm the "configured alias = identity, transliteration alone
+  = search-widening signal only" boundary.
+  `#multipleStructurallyIdenticalCatalogProducts_areNeverAutoPicked_surfacedForReviewInstead` (new,
+  Section 6 ambiguous-duplicate scenario).
+- `ImportBatchMatchingServiceTest#pendingRow_noCandidates_brandPresent_completeSearch_becomesAutoApprovedNewProduct`,
+  `#pendingRow_noCandidates_missingSearchDiagnostics_legacyRowNeverAutoCreatesNewProduct` (Section 6
+  "old batch without diagnostics" scenario),
+  `#pendingRow_noCandidates_incompleteSearch_becomesNeedsReview_notAutoApprovedNewProduct`.
+- `ImportBatchApplyServiceTest#newProduct_duplicateRowWithinSameBatch_reusesJustCreatedProduct_neverCreatesTwo`,
+  `#newProduct_identicalFingerprintAlreadyAppliedByEarlierBatch_reusesExistingProduct_neverCreatesDuplicate`
+  (Section 6 "repeated apply / parallel batches → one canonical product" scenario, using the real
+  `RowAttributeNormalizer` to compute the shared fingerprint so the test matches exactly what
+  `resolveProduct` recomputes for the created `Product`).
+- Full suite (`./mvnw clean verify`, real run, this sandbox): **360 tests, 0 failures, 1 error**
+  (`FlywayPostgresSchemaTest` — `IllegalState: Could not find a valid Docker environment`, pre-existing,
+  this sandbox has no Docker daemon running; not a regression, see "Осознанные ограничения" below).
+
+### Осознанные ограничения
+
+1. **Docker/Testcontainers-based Postgres verification was NOT possible in this sandbox** — the
+   Docker daemon is not running here (`docker ps` → "Cannot connect to the Docker daemon"), so
+   `FlywayPostgresSchemaTest` (migration-vs-entity drift, clean-schema and upgrade-from-baseline
+   checks) and `SchemaBaselineGenerator` could not be executed against a real PostgreSQL instance this
+   session. Every other test in the suite runs against H2 (`ddl-auto: update`, Flyway disabled in
+   `application.yml`) — this is a genuine, intentionally-flagged gap, not something this report claims
+   as "verified against Postgres". The two new migrations (`V30`, `V31`) are simple, additive,
+   nullable/defaulted `ALTER TABLE ... ADD COLUMN` statements consistent with every prior migration in
+   this series, but they have only been exercised via H2's `ddl-auto: update` auto-schema in tests, not
+   against real Postgres/Flyway. **First real deploy must run `V30`/`V31` against a staging Postgres
+   with Flyway enabled (matching `application-prod.yml`) before being trusted in production.**
+2. **No real supplier price file or IMAP credentials were available in this sandbox** — there is no
+   `imports/price-25-06.xlsx` in this workspace and no live supplier mailbox to test against; the
+   IMAP/XLSX end-to-end path is covered by `SupplierImportEndToEndTest` (synthetic fixtures, real H2
+   repositories) and `ImapMailboxClientGreenMailTest` (a real IMAP protocol exchange against an
+   in-process GreenMail server, not a live mailbox) — a genuinely real first-supplier onboarding still
+   needs to be observed against the actual mailbox/file before being called production-verified.
+3. **A true simultaneous-commit duplicate-creation race across replicas is reduced, not eliminated** —
+   apply-time re-verification (this ADR) closes the common case (duplicate row in one file, or a
+   second batch applied strictly after the first committed), but under READ COMMITTED, two DIFFERENT
+   apply transactions on two different replicas that both re-verify at the same instant (before either
+   commits) could still both see "no existing match" and both insert. Closing this completely would
+   need a stored, indexed `Product` fingerprint column with a DB-level unique constraint — deferred as
+   a larger schema change out of scope for this pass; documented here so it is not mistaken for a
+   solved problem.
+4. **The batch-scoped brand-fingerprint cache (`DeterministicMatchResolver`) is per-JVM-instance, not
+   cross-replica** — each replica processing a different batch for the same shop's same brand still
+   independently fetches/normalizes that brand once per its own batch; this is a real improvement over
+   the previous per-row reload, but not a shared cache across replicas.
+

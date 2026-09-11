@@ -84,9 +84,11 @@ public class ImportBatchMatchingService {
 
         NormalizedRowData normalized;
         List<ScoredCandidate> candidates;
+        SearchCompleteness completeness;
         try {
             normalized = readNormalizedData(row.getNormalizedData());
             candidates = readCandidates(row.getCandidateSearchResult());
+            completeness = readCompleteness(row.getCandidateSearchDiagnostics());
         } catch (Exception e) {
             // One row with corrupted/missing normalizedData/candidateSearchResult JSON must never
             // abort the whole batch (it previously did, via the outer catch in matchBatch()) -
@@ -100,7 +102,7 @@ public class ImportBatchMatchingService {
         }
 
         if (candidates.isEmpty()) {
-            return evaluateNewProductOrReview(row, normalized, null, "No fuzzy candidates found");
+            return evaluateNewProductOrReview(row, normalized, completeness, null, "No fuzzy candidates found");
         }
 
         String rowId = row.getId().toString();
@@ -122,7 +124,7 @@ public class ImportBatchMatchingService {
         }
 
         if (!parsed.matched()) {
-            return evaluateNewProductOrReview(row, normalized, response, "AI NO_MATCH: " + parsed.reason());
+            return evaluateNewProductOrReview(row, normalized, completeness, response, "AI NO_MATCH: " + parsed.reason());
         }
 
         ScoredCandidate chosen = candidates.stream()
@@ -164,26 +166,54 @@ public class ImportBatchMatchingService {
      * AUTO_APPROVED; неполная или противоречивая остаётся исключением"). Product creation itself
      * stays out of scope here - Prompt 06's Apply stage does it.
      */
+    /**
+     * ADR-030: a row with no viable existing catalog candidate may become a safe {@code
+     * NEW_PRODUCT} ONLY when BOTH (a) brand is present (unchanged pre-existing gate) AND (b) the
+     * required unbounded exact-identity catalog check actually ran to completion for this row
+     * ({@code completeness.requiredStagesCompleted()}) - "AI said NO_MATCH"/"zero fuzzy
+     * candidates" only ever means "no match among what was actually checked"; it is NOT proof
+     * that the row is a genuinely new product if the exact-identity check itself could not run
+     * (missing brand/fingerprint) or its result is unknown (a row persisted before this
+     * diagnostic existed - legacy data is never treated as "search was complete").
+     */
     private RowMatchOutcome evaluateNewProductOrReview(
-            ImportRow row, NormalizedRowData normalized, AiMatchResponse response, String baseReason) {
+            ImportRow row, NormalizedRowData normalized, SearchCompleteness completeness,
+            AiMatchResponse response, String baseReason) {
         boolean brandOk = !properties.getMatching().isNewProductRequireBrand()
                 || (normalized.brand() != null && !normalized.brand().isBlank());
+        boolean searchCompleteOk = !SearchCompleteness.isUnknown(completeness) && completeness.requiredStagesCompleted();
 
         String provider = response == null ? null : response.provider();
         String model = response == null ? null : response.model();
         String promptVersion = response == null ? null : response.promptVersion();
 
-        if (brandOk) {
+        if (brandOk && searchCompleteOk) {
             return RowMatchOutcome.auto(
                     row, MatchDecisionType.NEW_PRODUCT, null, List.of(),
-                    baseReason + "; safe NEW_PRODUCT (brand present, rawName/price/identifier already required)",
+                    baseReason + "; safe NEW_PRODUCT (brand present, rawName/price/identifier already "
+                            + "required, exact-identity catalog check completed with no match)",
                     provider, model, promptVersion, null);
         }
         MatchDecisionType decisionType = response == null ? MatchDecisionType.NO_MATCH : MatchDecisionType.AI_NO_MATCH;
+        String gap = !brandOk
+                ? "missing brand, cannot safely auto-create NEW_PRODUCT"
+                : "search completeness " + (SearchCompleteness.isUnknown(completeness) ? "unknown (row predates this diagnostic)"
+                        : "incomplete (" + completeness.reason() + ")") + " - cannot safely auto-create NEW_PRODUCT";
         return RowMatchOutcome.review(
                 row, decisionType, null, List.of(),
-                baseReason + "; missing brand, cannot safely auto-create NEW_PRODUCT",
+                baseReason + "; " + gap,
                 provider, model, promptVersion, null);
+    }
+
+    private SearchCompleteness readCompleteness(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, SearchCompleteness.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to parse ImportRow.candidateSearchDiagnostics as JSON", e);
+        }
     }
 
     private double minScore(SupplierSource source) {

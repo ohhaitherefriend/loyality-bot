@@ -62,6 +62,16 @@ public class ImportRow {
     @Column(columnDefinition = "TEXT")
     private String candidateSearchResult;
 
+    /**
+     * ADR-030: JSON-serialized {@code SearchCompleteness} - whether the required UNBOUNDED
+     * exact-identity catalog check actually ran for this row (vs was skipped because the row had
+     * no usable brand/fingerprint), independent of how many fuzzy candidates were found. {@code
+     * null} for any row processed before this diagnostic existed - {@code
+     * ImportBatchMatchingService} must treat that as "unknown", never as "complete", per ADR-030.
+     */
+    @Column(columnDefinition = "TEXT")
+    private String candidateSearchDiagnostics;
+
     @Enumerated(EnumType.STRING)
     @Column(length = 32)
     @Builder.Default

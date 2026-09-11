@@ -15,17 +15,21 @@ import java.util.List;
  * risk a {@code LazyInitializationException} if dereferenced later. The persistence writer resolves
  * the id back to a managed reference inside its own transaction.
  */
-public record MatchResolution(Long matchedProductId, MatchDecisionType decisionType, List<ScoredCandidate> candidates) {
+public record MatchResolution(
+        Long matchedProductId, MatchDecisionType decisionType, List<ScoredCandidate> candidates,
+        SearchCompleteness completeness) {
 
     public boolean isResolved() {
         return matchedProductId != null;
     }
 
+    /** A deterministically resolved row never needs a NEW_PRODUCT decision, so completeness is moot. */
     public static MatchResolution resolved(Long productId, MatchDecisionType decisionType) {
-        return new MatchResolution(productId, decisionType, List.of());
+        return new MatchResolution(productId, decisionType, List.of(),
+                SearchCompleteness.completed(RowAttributeNormalizer.NORMALIZATION_VERSION));
     }
 
-    public static MatchResolution unresolved(List<ScoredCandidate> candidates) {
-        return new MatchResolution(null, null, candidates);
+    public static MatchResolution unresolved(List<ScoredCandidate> candidates, SearchCompleteness completeness) {
+        return new MatchResolution(null, null, candidates, completeness);
     }
 }
