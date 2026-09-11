@@ -1,11 +1,13 @@
 package com.plstk.loyaltybot.service.importing;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.icegreen.greenmail.junit5.GreenMailExtension;
+import com.icegreen.greenmail.user.GreenMailUser;
+import com.icegreen.greenmail.util.ServerSetupTest;
 import com.plstk.loyaltybot.config.SupplierImportProperties;
 import com.plstk.loyaltybot.entity.commerce.Product;
 import com.plstk.loyaltybot.entity.importing.ImportBatch;
 import com.plstk.loyaltybot.entity.importing.ImportBatchStatus;
-import com.plstk.loyaltybot.entity.importing.ImportFile;
 import com.plstk.loyaltybot.entity.importing.MailAuthMode;
 import com.plstk.loyaltybot.entity.importing.MailboxConnection;
 import com.plstk.loyaltybot.entity.importing.PriceRoundingPolicy;
@@ -28,16 +30,23 @@ import com.plstk.loyaltybot.repository.SupplierRepository;
 import com.plstk.loyaltybot.repository.SupplierSourceRepository;
 import com.plstk.loyaltybot.service.TokenEncryptionService;
 import com.plstk.loyaltybot.service.importing.fixtures.SupplierWorkbookFixtures;
-import com.plstk.loyaltybot.service.importing.mailbox.FakeMailboxClient;
-import com.plstk.loyaltybot.service.importing.mailbox.FetchedMessage;
+import com.plstk.loyaltybot.service.importing.mailbox.ImapMailboxClient;
+import com.plstk.loyaltybot.service.importing.mailbox.MailboxClient;
 import com.plstk.loyaltybot.service.importing.mailbox.SupplierSourceMatcher;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import jakarta.activation.DataHandler;
+import jakarta.mail.Message;
+import jakarta.mail.Session;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import jakarta.mail.util.ByteArrayDataSource;
 import jakarta.persistence.EntityManager;
-import org.apache.poi.ss.usermodel.Workbook;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -47,44 +56,40 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Prompt 09 production-hardening end-to-end coverage: runs the real orchestrator services for
- * every pipeline stage back-to-back against real (H2) repositories, the same way the production
- * scheduled jobs would call them one tick at a time, rather than exercising a single stage in
- * isolation like {@code ImportBatchParsingServiceTest}/{@code ImportBatchNormalizingServiceTest}/
- * {@code ImportBatchMatchingServiceTest}/{@code ImportBatchValidationServiceTest}/
- * {@code ImportBatchApplyServiceTest} do.
+ * ADR-031 (Section 7): the ONE end-to-end test in the suite that never fakes ANY part of the
+ * email-transport boundary - a real (embedded) IMAP server (GreenMail), a real generated XLSX
+ * workbook (byte-for-byte the same structure {@code SupplierWorkbookFixtures} produces for every
+ * other test), and the PRODUCTION {@link ImapMailboxClient} (never {@code FakeMailboxClient}) -
+ * driven through every real pipeline stage (poll -&gt; ingest -&gt; parse -&gt; normalize -&gt; match -&gt;
+ * validate -&gt; apply) all the way to {@code APPLIED}, with a genuinely new product appearing on
+ * the storefront query with the exact commission-adjusted price.
  *
- * <p>Only {@link AiSpreadsheetLayoutDetector} and {@link AiCatalogMatcher} are faked (real DeepSeek
- * HTTP calls are covered separately by {@code DeepSeekSpreadsheetLayoutDetectorTest}/
- * {@code DeepSeekCatalogMatcherTest}); every other bean here is the real production
- * implementation. The storefront boundary is asserted directly against
- * {@code ProductRepository.searchStorefrontProducts(...)} - the exact query
- * {@code StorefrontService.listProducts} runs - rather than through the full
- * {@code StorefrontService}/{@code StorefrontController}, since that service's other
- * dependencies (bot/Telegram/order/subscription machinery) are unrelated to what this suite is
- * verifying and would only add unrelated setup and fragility.
+ * <p>Every other suite ({@code SupplierImportEndToEndTest}) intentionally uses
+ * {@code FakeMailboxClient} to keep those tests fast and focused on the pipeline logic itself
+ * (protocol-level IMAP correctness is separately, exhaustively covered by
+ * {@code ImapMailboxClientGreenMailTest}); this test's whole purpose is to prove those two
+ * previously-separate pieces (real IMAP fetch + the real downstream pipeline) actually compose
+ * correctly end-to-end, which neither of those two test classes alone verifies.
  */
 @DataJpaTest
-@Import(SupplierImportEndToEndTest.TestConfig.class)
-class SupplierImportEndToEndTest {
+@Import(SupplierImportGreenMailEndToEndTest.TestConfig.class)
+class SupplierImportGreenMailEndToEndTest {
 
-    private static final String SHOP_ID = "shop-e2e";
+    private static final String SHOP_ID = "shop-greenmail-e2e";
+    private static final String SUPPLIER_EMAIL = "price@greenmail-supplier.test";
+    private static final String SUPPLIER_PASSWORD = "app-password-e2e-123";
+
+    @RegisterExtension
+    static GreenMailExtension greenMail = new GreenMailExtension(ServerSetupTest.IMAP);
 
     @Autowired
     private SupplierRepository supplierRepository;
@@ -93,27 +98,13 @@ class SupplierImportEndToEndTest {
     @Autowired
     private MailboxConnectionRepository mailboxConnectionRepository;
     @Autowired
-    private MailboxCursorRepository mailboxCursorRepository;
-    @Autowired
-    private ImportFileRepository importFileRepository;
-    @Autowired
     private ImportBatchRepository importBatchRepository;
-    @Autowired
-    private ImportRowRepository importRowRepository;
-    @Autowired
-    private ImportRuleVersionRepository importRuleVersionRepository;
     @Autowired
     private ProductRepository productRepository;
     @Autowired
     private SupplierOfferRepository supplierOfferRepository;
     @Autowired
-    private SupplierProductLinkRepository supplierProductLinkRepository;
-    @Autowired
     private TokenEncryptionService tokenEncryptionService;
-    @Autowired
-    private ImportFileStorage importFileStorage;
-    @Autowired
-    private FakeMailboxClient fakeMailboxClient;
     @Autowired
     private MailboxPollingService mailboxPollingService;
     @Autowired
@@ -131,13 +122,9 @@ class SupplierImportEndToEndTest {
     @Autowired
     private ImportBatchApplyService applyService;
     @Autowired
-    private ImportBatchResumeService resumeService;
-    @Autowired
-    private ObjectMapper objectMapper;
-    @Autowired
     private EntityManager entityManager;
 
-    @TempDir
+    @org.junit.jupiter.api.io.TempDir
     static Path tempDir;
 
     @DynamicPropertySource
@@ -149,28 +136,24 @@ class SupplierImportEndToEndTest {
     void setUp() {
         fakeAiLayoutDetector.reset();
         fakeAiCatalogMatcher.reset();
-        // Safe fallback for any row whose fuzzy candidate search happens to surface a weak,
-        // unrelated candidate (e.g. shared trigrams/units) once the catalog is no longer empty -
-        // AI matching itself is exhaustively covered by ImportBatchMatchingServiceTest/
-        // DeepSeekCatalogMatcherTest, so this suite only needs a safe default rather than
-        // hand-crafting a response for every incidental weak candidate a fixture produces.
         fakeAiCatalogMatcher.alwaysNoMatch();
     }
 
-    // ========== 1. Happy path: email -&gt; attachment -&gt; AI layout -&gt; parse -&gt; match -&gt; gates -&gt;
-    //               automatic apply -&gt; commission applied -&gt; new product appears on storefront ==========
-
     @Test
-    void happyPath_emailToStorefront_newProductAutoAppliedWithCommission() {
-        Supplier supplier = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Perfume Supplier").build());
+    void realImapFetch_realXlsx_throughEveryPipelineStage_toAppliedWithCorrectCommissionPrice() throws Exception {
+        Supplier supplier = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("GreenMail Supplier").build());
+        GreenMailUser user = greenMail.setUser(SUPPLIER_EMAIL, SUPPLIER_PASSWORD);
         MailboxConnection mailbox = mailboxConnectionRepository.save(MailboxConnection.builder()
-                .shopId(SHOP_ID).label("main").host("imap.mail.ru").port(993).username("shop@mail.ru")
-                .encryptedSecret(tokenEncryptionService.encrypt("app-password"))
-                .authMode(MailAuthMode.APP_PASSWORD).enabled(true)
+                .shopId(SHOP_ID).label("main")
+                .host("127.0.0.1").port(greenMail.getImap().getPort())
+                .username(SUPPLIER_EMAIL)
+                .encryptedSecret(tokenEncryptionService.encrypt(SUPPLIER_PASSWORD))
+                .authMode(MailAuthMode.APP_PASSWORD)
+                .folder("INBOX").useTls(false).enabled(true)
                 .build());
         SupplierSource source = supplierSourceRepository.save(SupplierSource.builder()
                 .shopId(SHOP_ID).supplier(supplier).label("main").mailboxConnection(mailbox)
-                .senderAllowlist("supplier.ru")
+                .senderAllowlist("greenmail-supplier.test")
                 .snapshotMode(SnapshotMode.FULL).snapshotScope("ALL")
                 .autoApply(true).shadowMode(false)
                 .commissionPercentOverride(new BigDecimal("30.00"))
@@ -178,200 +161,80 @@ class SupplierImportEndToEndTest {
                 .build());
         entityManager.flush();
 
-        // 1. Email arrives with an xlsx attachment (real IMAP protocol covered separately by
-        //    ImapMailboxClientGreenMailTest; FakeMailboxClient replays server-side UID filtering
-        //    exactly like MailboxPollingServiceTest does).
-        fakeMailboxClient.setUidValidity(1L);
-        byte[] workbookBytes = SupplierWorkbookFixtures.toBytes(SupplierWorkbookFixtures.standardLayoutWorkbook());
-        fakeMailboxClient.setServerMessages(List.of(new FetchedMessage(1L, "price@supplier.ru", "Price list",
-                List.of(FakeMailboxClient.attachment("price.xlsx", "application/octet-stream", workbookBytes)))));
+        // A real XLSX workbook (exact structure documented in the workspace rules), sent as a real
+        // MIME attachment through a real embedded IMAP server - never a hand-built FetchedMessage.
+        byte[] xlsxBytes = SupplierWorkbookFixtures.toBytes(SupplierWorkbookFixtures.standardLayoutWorkbook(
+                List.of(SupplierWorkbookFixtures.row("SKU-NEW-1", "Nivea", "Крем для лица GreenMail 100 мл", new BigDecimal("1000.00"))),
+                List.of()));
+        deliverPriceListEmail(user, "price.xlsx", xlsxBytes);
 
+        // 1. Real IMAP poll: production ImapMailboxClient connects to the embedded GreenMail
+        //    server, lists the new message by UID, downloads the real attachment bytes.
         PollResult pollResult = mailboxPollingService.pollOne(mailbox.getId());
         entityManager.flush();
         entityManager.clear();
         assertEquals("SUCCESS", pollResult.status());
         assertEquals(1, pollResult.ingestedCount());
 
-        ImportBatch stored = onlyBatch(source.getId());
-        assertEquals(ImportBatchStatus.STORED, stored.getStatus());
-        Long batchId = stored.getId();
+        List<ImportBatch> batches = importBatchRepository.findAll().stream()
+                .filter(b -> b.getSupplierSource().getId().equals(source.getId()))
+                .toList();
+        assertEquals(1, batches.size());
+        Long batchId = batches.get(0).getId();
+        assertEquals(ImportBatchStatus.STORED, batches.get(0).getStatus());
 
-        // 2. AI layout detection (first batch for this source, no published rule yet).
+        // 2. Real downstream pipeline: AI layout detection (faked, same as every other e2e suite -
+        //    real DeepSeek HTTP calls are covered separately) -> parse -> normalize -> match -> validate -> apply.
         fakeAiLayoutDetector.enqueue(LayoutDetectionResponse.success(
-                SupplierWorkbookFixtures.standardLayoutRuleJson(), "deepseek", "deepseek-chat", 120L));
-
+                SupplierWorkbookFixtures.standardLayoutRuleJson(), "deepseek", "deepseek-chat", 100L));
         runToApply(batchId);
 
-        assertEquals(1, fakeAiLayoutDetector.callCount(), "unknown layout must call AI exactly once");
-        assertEquals(0, fakeAiCatalogMatcher.callCount(),
-                "a brand new catalog has zero fuzzy candidates for every row, so NEW_PRODUCT is decided "
-                        + "without ever calling the AI catalog matcher");
-
         ImportBatch applied = importBatchRepository.findById(batchId).orElseThrow();
-        assertEquals(ImportBatchStatus.APPLIED, applied.getStatus());
-        assertTrue(applied.getOffersAddedCount() >= 1);
+        assertEquals(ImportBatchStatus.APPLIED, applied.getStatus(),
+                "the batch ingested via a REAL IMAP fetch must reach APPLIED through the real pipeline");
+        assertEquals(1, applied.getOffersAddedCount());
 
-        // 3. Commission applied: Chanel No 5 100 ml costs 12500.00 from the fixture, +30% commission.
-        Product chanel = productRepository.findAll().stream()
-                .filter(p -> p.getName() != null && p.getName().contains("Chanel No 5"))
-                .findFirst().orElseThrow(() -> new AssertionError("Chanel No 5 product was not created"));
-        assertEquals(new BigDecimal("16250.00"), chanel.getSalePrice());
-        assertTrue(chanel.getVisible(), "a new product with an active offer must be visible");
-        assertTrue(chanel.getActive());
+        // 3. Price 1000.00 + 30% commission = 1300.00 (Section 7 acceptance criterion), new product,
+        //    visible on the exact storefront listing query.
+        Product product = productRepository.findAll().stream()
+                .filter(p -> p.getName() != null && p.getName().contains("GreenMail"))
+                .findFirst().orElseThrow(() -> new AssertionError("product from the GreenMail-delivered file was not created"));
+        assertEquals(new BigDecimal("1300.00"), product.getSalePrice());
+        assertTrue(product.getVisible());
 
         SupplierOffer offer = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplier.getId(), "ALL", chanel.getId())
+                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplier.getId(), "ALL", product.getId())
                 .orElseThrow();
-        assertEquals(new BigDecimal("30.00"), offer.getAppliedCommissionPercent());
+        assertEquals(new BigDecimal("1000.00"), offer.getSupplierPrice());
+        assertEquals(new BigDecimal("1300.00"), offer.getCalculatedSitePrice());
         assertTrue(offer.getActive());
 
-        // 4. New product appears on storefront: the exact query StorefrontService.listProducts runs.
         List<Product> storefrontResults = productRepository.searchStorefrontProducts(
                 SHOP_ID, null, null, null, Pageable.unpaged()).getContent();
-        assertTrue(storefrontResults.stream().anyMatch(p -> p.getId().equals(chanel.getId())),
-                "new product must be visible through the storefront product listing query");
+        assertTrue(storefrontResults.stream().anyMatch(p -> p.getId().equals(product.getId())),
+                "the product ingested via real IMAP must appear through the storefront listing query");
     }
 
-    // ========== 2. Snapshot reconciliation: disappearance / multi-supplier / reappearance ==========
+    private void deliverPriceListEmail(GreenMailUser user, String filename, byte[] attachmentBytes) throws Exception {
+        Session session = Session.getInstance(new Properties());
+        MimeMessage message = new MimeMessage(session);
+        message.setFrom(new InternetAddress(SUPPLIER_EMAIL));
+        message.setRecipients(Message.RecipientType.TO, SUPPLIER_EMAIL);
+        message.setSubject("Price list");
 
-    @Test
-    void snapshotReconciliation_disappearance_multiSupplier_reappearance() {
-        Supplier supplierA = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier A").build());
-        Supplier supplierB = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Supplier B").build());
-        SupplierSource sourceA = saveSource(supplierA, "source-a");
-        entityManager.flush();
+        MimeMultipart multipart = new MimeMultipart();
+        MimeBodyPart textPart = new MimeBodyPart();
+        textPart.setText("see attached price list");
+        multipart.addBodyPart(textPart);
 
-        // Batch 1: FULL snapshot from Supplier A carrying two products.
-        Long batch1 = createStoredBatch(sourceA, SupplierWorkbookFixtures.standardLayoutWorkbook(
-                List.of(
-                        SupplierWorkbookFixtures.row("ONLY-A", "Nivea", "Only-A cream 50 ml", new BigDecimal("100.00")),
-                        SupplierWorkbookFixtures.row("SHARED", "Chanel", "Shared perfume 50 ml", new BigDecimal("200.00"))),
-                List.of()));
-        fakeAiLayoutDetector.enqueue(LayoutDetectionResponse.success(
-                SupplierWorkbookFixtures.standardLayoutRuleJson(), "deepseek", "deepseek-chat", 100L));
-        runToApply(batch1);
-        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch1).getStatus());
+        MimeBodyPart attachmentPart = new MimeBodyPart();
+        attachmentPart.setDataHandler(new DataHandler(new ByteArrayDataSource(attachmentBytes, "application/octet-stream")));
+        attachmentPart.setFileName(filename);
+        multipart.addBodyPart(attachmentPart);
 
-        Product onlyA = requireProductByName("Only-A cream 50 ml");
-        Product shared = requireProductByName("Shared perfume 50 ml");
-        assertTrue(onlyA.getVisible());
-        assertTrue(shared.getVisible());
-
-        // Supplier B also carries the SHARED product (seeded directly: cross-supplier fuzzy/AI
-        // matching itself is already covered by ImportBatchMatchingServiceTest/DeepSeekCatalogMatcherTest;
-        // this suite's job is to verify the Apply stage's multi-supplier availability rule when driven
-        // through the real pipeline, not to re-derive the AI matching decision for a second supplier).
-        supplierOfferRepository.save(SupplierOffer.builder()
-                .shopId(SHOP_ID).supplier(supplierB).supplierSource(sourceA).snapshotScope("ALL").product(shared)
-                .supplierPrice(new BigDecimal("190.00")).appliedCommissionPercent(new BigDecimal("30.00"))
-                .calculatedSitePrice(new BigDecimal("247.00")).active(true).build());
-        entityManager.flush();
-
-        // Batch 2: next FULL snapshot from Supplier A no longer contains ONLY-A or SHARED (only an
-        // unrelated filler row, so the "empty FULL snapshot" guard does not fire).
-        Long batch2 = createStoredBatch(sourceA, SupplierWorkbookFixtures.standardLayoutWorkbook(
-                List.of(SupplierWorkbookFixtures.row("FILLER", "Garnier", "Filler shampoo 400 ml", new BigDecimal("50.00"))),
-                List.of()));
-        runToApply(batch2);
-        assertEquals(1, fakeAiLayoutDetector.callCount(),
-                "same header layout must reuse the published rule, no additional AI call beyond batch1's initial one");
-        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch2).getStatus());
-
-        SupplierOffer onlyAOfferAfterBatch2 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", onlyA.getId())
-                .orElseThrow();
-        assertFalse(onlyAOfferAfterBatch2.getActive(), "Supplier A's offer must be deactivated when it disappears from a FULL snapshot");
-        assertFalse(reloadProduct(onlyA.getId()).getVisible(),
-                "a product with zero active offers must disappear from the storefront");
-
-        SupplierOffer sharedOfferAfterBatch2 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", shared.getId())
-                .orElseThrow();
-        assertFalse(sharedOfferAfterBatch2.getActive(), "Supplier A's own offer for SHARED must also be deactivated");
-        assertTrue(reloadProduct(shared.getId()).getVisible(),
-                "SHARED must remain visible on storefront because Supplier B's offer is still active");
-
-        // Batch 3: ONLY-A and SHARED both reappear in the next FULL snapshot from Supplier A.
-        Long batch3 = createStoredBatch(sourceA, SupplierWorkbookFixtures.standardLayoutWorkbook(
-                List.of(
-                        SupplierWorkbookFixtures.row("ONLY-A", "Nivea", "Only-A cream 50 ml", new BigDecimal("110.00")),
-                        SupplierWorkbookFixtures.row("SHARED", "Chanel", "Shared perfume 50 ml", new BigDecimal("205.00"))),
-                List.of()));
-        runToApply(batch3);
-        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch3).getStatus());
-
-        SupplierOffer onlyAOfferAfterBatch3 = supplierOfferRepository
-                .findByShopIdAndSupplierIdAndSnapshotScopeAndProductId(SHOP_ID, supplierA.getId(), "ALL", onlyA.getId())
-                .orElseThrow();
-        assertTrue(onlyAOfferAfterBatch3.getActive(), "a reappearing offer must be reactivated automatically");
-        assertTrue(reloadProduct(onlyA.getId()).getVisible(), "the product must return to the storefront automatically");
-    }
-
-    // ========== 3. Exception path: schema drift -&gt; quarantine -&gt; operator resume -&gt; success ==========
-
-    @Test
-    void schemaDrift_quarantinesBatch_thenOperatorResumeRetriesSuccessfully() {
-        Supplier supplier = supplierRepository.save(Supplier.builder().shopId(SHOP_ID).name("Drift Supplier").build());
-        SupplierSource source = saveSource(supplier, "drift-source");
-        entityManager.flush();
-
-        // Establish an ACTIVE rule via a first, normal batch.
-        Long batch1 = createStoredBatch(source, SupplierWorkbookFixtures.standardLayoutWorkbook(
-                List.of(SupplierWorkbookFixtures.row("SKU-1", "Nivea", "Baseline cream 50 ml", new BigDecimal("100.00"))),
-                List.of()));
-        fakeAiLayoutDetector.enqueue(LayoutDetectionResponse.success(
-                SupplierWorkbookFixtures.standardLayoutRuleJson(), "deepseek", "deepseek-chat", 100L));
-        runToApply(batch1);
-        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batch1).getStatus());
-
-        // Next file has schema drift (header moved, one column renamed) - the ACTIVE rule's header
-        // signature no longer matches, so parsing falls back to AI detection. Simulate an AI/transport
-        // anomaly on the first attempt.
-        Long batch2 = createStoredBatch(source, SupplierWorkbookFixtures.driftedLayoutWorkbook());
-        fakeAiLayoutDetector.enqueue(LayoutDetectionResponse.failure(
-                "DeepSeek call failed after 3 attempt(s): Read timed out", true, "deepseek"));
-
-        parsingService.parseBatch(batch2);
-        entityManager.flush();
-        entityManager.clear();
-
-        ImportBatch quarantined = reloadBatch(batch2);
-        assertEquals(ImportBatchStatus.QUARANTINED, quarantined.getStatus());
-        assertTrue(quarantined.getErrorMessage() != null
-                && quarantined.getErrorMessage().contains("AI layout detection failed"));
-
-        // Operator decision: resume the quarantined batch (docs/ARCHITECTURE.md §12, same action as
-        // ImportOperationsController's POST /batches/{batchId}/resume).
-        Optional<ImportBatch> resumed = resumeService.resume(SHOP_ID, batch2);
-        assertTrue(resumed.isPresent());
-        assertEquals(ImportBatchStatus.STORED, resumed.get().getStatus(),
-                "a batch that never got a ruleVersion must resume all the way back to STORED");
-        assertEquals(2, resumed.get().getAttemptNumber());
-        entityManager.flush();
-
-        // Retry succeeds this time with the corrected layout rule for the drifted header.
-        fakeAiLayoutDetector.enqueue(LayoutDetectionResponse.success(driftedLayoutRuleJson(), "deepseek", "deepseek-chat", 100L));
-        runToApply(batch2);
-
-        ImportBatch finalBatch = reloadBatch(batch2);
-        assertEquals(ImportBatchStatus.APPLIED, finalBatch.getStatus());
-        assertEquals(3, fakeAiLayoutDetector.callCount(),
-                "batch1's initial layout call, plus one failed + one successful AI layout call for batch2's two attempts");
-
-        Product product = requireProductByName("Крем для рук 100 мл");
-        assertTrue(product.getVisible());
-    }
-
-    // ========== helpers ==========
-
-    private SupplierSource saveSource(Supplier supplier, String label) {
-        return supplierSourceRepository.save(SupplierSource.builder()
-                .shopId(SHOP_ID).supplier(supplier).label(label)
-                .snapshotMode(SnapshotMode.FULL).snapshotScope("ALL")
-                .autoApply(true).shadowMode(false)
-                .commissionPercentOverride(new BigDecimal("30.00"))
-                .roundingPolicy(PriceRoundingPolicy.WHOLE_UNIT_HALF_UP)
-                .build());
+        message.setContent(multipart);
+        message.saveChanges();
+        user.deliver(message);
     }
 
     /** Runs parse -&gt; normalize -&gt; match -&gt; validate -&gt; (apply if AUTO_APPROVED) for one batch. */
@@ -390,107 +253,11 @@ class SupplierImportEndToEndTest {
         entityManager.clear();
         ImportBatch afterValidation = importBatchRepository.findById(batchId).orElseThrow();
         ImportBatchStatus statusAfterValidation = afterValidation.getStatus();
-        // Clear before applying: otherwise the batch entity just loaded above (status
-        // AUTO_APPROVED) stays cached in this @DataJpaTest's single shared persistence context, and
-        // ImportBatchApplyWriter.applyBatch's own by-id lookup would silently return that same stale
-        // managed instance instead of reflecting the APPLYING status the claim UPDATE below just
-        // committed - a test-only artifact of one shared EntityManager across every stage. In
-        // production each stage's @Transactional service method opens its own fresh EntityManager
-        // since nothing wraps the scheduled job in an outer transaction, so this never happens there.
         entityManager.clear();
         if (statusAfterValidation == ImportBatchStatus.AUTO_APPROVED) {
             applyService.applyNewly(batchId);
             entityManager.flush();
             entityManager.clear();
-        }
-    }
-
-    private ImportBatch onlyBatch(Long supplierSourceId) {
-        List<ImportBatch> batches = importBatchRepository.findAll().stream()
-                .filter(b -> b.getSupplierSource().getId().equals(supplierSourceId))
-                .toList();
-        assertEquals(1, batches.size());
-        return batches.get(0);
-    }
-
-    private ImportBatch reloadBatch(Long batchId) {
-        return importBatchRepository.findById(batchId).orElseThrow();
-    }
-
-    private Product reloadProduct(Long productId) {
-        return productRepository.findById(productId).orElseThrow();
-    }
-
-    private Product requireProductByName(String nameSubstring) {
-        return productRepository.findAll().stream()
-                .filter(p -> p.getName() != null && p.getName().contains(nameSubstring))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("Product containing '" + nameSubstring + "' was not found"));
-    }
-
-    private String driftedLayoutRuleJson() {
-        return """
-                {
-                  "sheetSelectors": ["%s"],
-                  "headerRow": 3,
-                  "firstDataRow": 4,
-                  "columns": {
-                    "externalSku": {"headerAliases": ["Артикул"], "type": "STRING", "required": true},
-                    "barcode": {"headerAliases": ["Штрихкод"], "type": "BARCODE", "required": false},
-                    "rawName": {"headerAliases": ["Наименование"], "type": "STRING", "required": true},
-                    "brand": {"headerAliases": ["Бренд"], "type": "STRING", "required": false},
-                    "supplierPrice": {"headerAliases": ["Цена"], "type": "DECIMAL", "required": true}
-                  }
-                }
-                """.formatted(SupplierWorkbookFixtures.SHEET_COSMETICS);
-    }
-
-    private Long createStoredBatch(SupplierSource source, Workbook workbook) {
-        try {
-            byte[] bytes = SupplierWorkbookFixtures.toBytes(workbook);
-            Path tempFile = Files.createTempFile("e2e-workbook-", ".xlsx");
-            Files.write(tempFile, bytes);
-            String sha256 = sha256Hex(bytes);
-            String storageKey = importFileStorage.store(SHOP_ID, sha256, "price.xlsx", tempFile);
-            Files.deleteIfExists(tempFile);
-
-            ImportFile importFile = importFileRepository.save(ImportFile.builder()
-                    .shopId(SHOP_ID)
-                    .supplierSource(source)
-                    .sha256(sha256)
-                    .sizeBytes((long) bytes.length)
-                    .mediaType("application/octet-stream")
-                    .originalFilename("price.xlsx")
-                    .storageKey(storageKey)
-                    .receivedAt(LocalDateTime.now())
-                    .build());
-
-            ImportBatch batch = importBatchRepository.save(ImportBatch.builder()
-                    .shopId(SHOP_ID)
-                    .supplierSource(source)
-                    .importFile(importFile)
-                    .status(ImportBatchStatus.STORED)
-                    .attemptNumber(1)
-                    .build());
-            entityManager.flush();
-            entityManager.clear();
-            return batch.getId();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    private String sha256Hex(byte[] bytes) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(bytes);
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
         }
     }
 
@@ -517,11 +284,11 @@ class SupplierImportEndToEndTest {
             return new LocalImportFileStorage(properties);
         }
 
-        // ----- mailbox polling (happy path only) -----
+        // ----- mailbox polling: REAL ImapMailboxClient, never FakeMailboxClient -----
 
         @Bean
-        FakeMailboxClient fakeMailboxClient() {
-            return new FakeMailboxClient();
+        MailboxClient mailboxClient() {
+            return new ImapMailboxClient();
         }
 
         @Bean
@@ -589,7 +356,7 @@ class SupplierImportEndToEndTest {
                 MailboxConnectionRepository mailboxConnectionRepository,
                 MailboxCursorRepository mailboxCursorRepository,
                 SupplierSourceRepository supplierSourceRepository,
-                FakeMailboxClient fakeMailboxClient,
+                MailboxClient mailboxClient,
                 SupplierSourceMatcher supplierSourceMatcher,
                 AttachmentIngestionService attachmentIngestionService,
                 ImportJobClaimService importJobClaimService,
@@ -599,7 +366,7 @@ class SupplierImportEndToEndTest {
                 ObjectMapper objectMapper,
                 SupplierImportMetrics metrics) {
             return new MailboxPollingService(
-                    mailboxConnectionRepository, mailboxCursorRepository, supplierSourceRepository, fakeMailboxClient,
+                    mailboxConnectionRepository, mailboxCursorRepository, supplierSourceRepository, mailboxClient,
                     supplierSourceMatcher, attachmentIngestionService, importJobClaimService, tokenEncryptionService,
                     mailboxPollStateWriter, properties, objectMapper, metrics);
         }
@@ -830,14 +597,6 @@ class SupplierImportEndToEndTest {
         @Bean
         ImportBatchApplyService importBatchApplyService(ImportBatchApplyWriter writer, SupplierImportMetrics metrics) {
             return new ImportBatchApplyService(writer, metrics);
-        }
-
-        // ----- resume (exception path operator action) -----
-
-        @Bean
-        ImportBatchResumeService importBatchResumeService(
-                ImportBatchRepository importBatchRepository, ImportRowRepository importRowRepository) {
-            return new ImportBatchResumeService(importBatchRepository, importRowRepository);
         }
     }
 }

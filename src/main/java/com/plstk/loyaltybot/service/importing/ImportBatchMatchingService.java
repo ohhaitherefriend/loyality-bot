@@ -101,6 +101,22 @@ public class ImportBatchMatchingService {
                     null, null, null, null);
         }
 
+        // ADR-031 (Section 1 scenario B / Section 3): more than one catalog product structurally
+        // identical to this row is a data-quality anomaly, not a normal "AI picks among fuzzy
+        // candidates" situation - it must ALWAYS go to review, regardless of what the AI would say
+        // about the same candidates, and AI is not even worth calling for this row. Checked before
+        // touching candidates/AI at all so no confidence score can ever override it.
+        if (completeness != null && completeness.isAmbiguous()) {
+            String candidateIds = candidates.stream()
+                    .map(c -> String.valueOf(c.productId()))
+                    .collect(Collectors.joining(", "));
+            return RowMatchOutcome.review(
+                    row, MatchDecisionType.NO_MATCH, null, List.of(),
+                    "Ambiguous existing matches (candidate product ids: " + candidateIds + "): "
+                            + completeness.reason() + " - requires manual review; never auto-created or auto-selected",
+                    null, null, null, null);
+        }
+
         if (candidates.isEmpty()) {
             return evaluateNewProductOrReview(row, normalized, completeness, null, "No fuzzy candidates found");
         }
@@ -181,7 +197,14 @@ public class ImportBatchMatchingService {
             AiMatchResponse response, String baseReason) {
         boolean brandOk = !properties.getMatching().isNewProductRequireBrand()
                 || (normalized.brand() != null && !normalized.brand().isBlank());
-        boolean searchCompleteOk = !SearchCompleteness.isUnknown(completeness) && completeness.requiredStagesCompleted();
+        // ADR-031: "AI said NO_MATCH"/"zero fuzzy candidates" is NEVER by itself proof this row is
+        // genuinely new - only a search that ran fully (searchState == COMPLETE) AND found no
+        // structurally-identical product (identityOutcome == NONE) is safe grounds for an
+        // automatic NEW_PRODUCT. An errored/limited/stale search, or one that IS ambiguous
+        // (already short-circuited to review earlier in processRow, but re-checked here too in
+        // case this method is ever reached directly with an ambiguous completeness), always fails
+        // this gate.
+        boolean searchCompleteOk = !SearchCompleteness.isUnknown(completeness) && completeness.permitsAutomaticNewProduct();
 
         String provider = response == null ? null : response.provider();
         String model = response == null ? null : response.model();
@@ -198,7 +221,9 @@ public class ImportBatchMatchingService {
         String gap = !brandOk
                 ? "missing brand, cannot safely auto-create NEW_PRODUCT"
                 : "search completeness " + (SearchCompleteness.isUnknown(completeness) ? "unknown (row predates this diagnostic)"
-                        : "incomplete (" + completeness.reason() + ")") + " - cannot safely auto-create NEW_PRODUCT";
+                        : "incomplete (" + completeness.reason() + ", searchState=" + completeness.searchState()
+                                + ", identityOutcome=" + completeness.identityOutcome() + ")")
+                        + " - cannot safely auto-create NEW_PRODUCT";
         return RowMatchOutcome.review(
                 row, decisionType, null, List.of(),
                 baseReason + "; " + gap,

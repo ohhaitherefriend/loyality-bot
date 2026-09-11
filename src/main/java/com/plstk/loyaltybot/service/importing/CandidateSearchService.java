@@ -64,4 +64,17 @@ public class CandidateSearchService {
                 .limit(cfg.getMaxCandidates())
                 .toList();
     }
+
+    /**
+     * ADR-031 (Section 1 scenario B): scores a SPECIFIC, already-known set of products (e.g. the
+     * ambiguous set {@code DeterministicMatchResolver#resolveViaSafeFingerprint} found - more than
+     * one structurally-identical catalog product) for human/AI review, without running a fresh
+     * bounded/ranked fetch - the candidates here are already known to be relevant by construction.
+     */
+    public List<ScoredCandidate> scoreProducts(String shopId, NormalizedRowData row, List<Product> products) {
+        return products.stream()
+                .map(product -> scorer.score(shopId, product.getId(), product.getName(), row, normalizer.normalizeProduct(shopId, product)))
+                .sorted(Comparator.comparing(ScoredCandidate::totalScore).reversed())
+                .toList();
+    }
 }

@@ -110,6 +110,21 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
             Pageable pageable);
 
     /**
+     * ADR-031 (Section 2): UNBOUNDED variant of {@link #findByShopIdAndBrandTokenInAndNameToken} -
+     * {@code SimpleProductCandidateFetcher} must rank across every product matching this
+     * brand+name-token combination BEFORE truncating to any fetch limit, never truncate the raw
+     * per-query result first (the exact "premature limiting before ranking" defect the report
+     * requires be eliminated). Scoped by brand token, so its result size is naturally bounded by
+     * how many products share this row's own brand - a much smaller set than the whole catalog.
+     */
+    @Query("SELECT p FROM Product p WHERE p.shopId = :shopId AND LOWER(p.brand) IN :brandTokens "
+            + "AND LOWER(p.name) LIKE LOWER(CONCAT('%', :nameToken, '%'))")
+    List<Product> findByShopIdAndBrandTokenInAndNameToken(
+            @Param("shopId") String shopId,
+            @Param("brandTokens") java.util.Collection<String> brandTokens,
+            @Param("nameToken") String nameToken);
+
+    /**
      * PostgreSQL-only candidate pool for {@code TrigramProductCandidateFetcher}, requiring the
      * {@code pg_trgm} extension (see V19). Only ever invoked when
      * {@code supplier-import.matching.pg-trgm-enabled=true} explicitly selects that fetcher - never

@@ -58,10 +58,11 @@ public class RowAttributeNormalizer {
 
     /**
      * Bumped whenever the fingerprint algorithm changes in a way that changes its output for the
-     * same input (ADR-030 bumped 1 -&gt; 2: alias-canonical brand + brand-stripped line). See class
-     * javadoc "Normalization versioning".
+     * same input (ADR-030 bumped 1 -&gt; 2: alias-canonical brand + brand-stripped line; ADR-031
+     * bumped 2 -&gt; 3: "No"/"No." product-number spelling equivalence, see {@link
+     * #PRODUCT_NUMBER_ABBREVIATION_PATTERN}). See class javadoc "Normalization versioning".
      */
-    public static final int NORMALIZATION_VERSION = 2;
+    public static final int NORMALIZATION_VERSION = 3;
 
     private static final Pattern VOLUME_PATTERN = Pattern.compile(
             "(\\d+(?:[.,]\\d+)?)\\s*(мл|ml|л|l|кг|kg|мг|mg|гр|g|г|oz)(?![a-zA-Zа-яёА-ЯЁ])",
@@ -90,6 +91,21 @@ public class RowAttributeNormalizer {
             Pattern.compile("(?:оттенок|тон|shade|цвет|color)\\s+([a-zA-Zа-яёА-ЯЁ0-9\\-]+)",
                     Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE),
     };
+
+    /**
+     * ADR-031 (Section 2, scenario A root cause): a "No"/"No." product-number token (e.g. the
+     * perfume line "Chanel No 5" vs a supplier's own "Chanel No. 5" spelling) must compare equal
+     * regardless of whether the abbreviation-period is present - the period after "No" is a purely
+     * orthographic variant, never a decimal point (a decimal point is only ever preceded by a
+     * DIGIT, e.g. "1.5", which this pattern - anchored on the LETTERS "No" - can never match, so
+     * "1.5" is never touched/corrupted by this substitution). Deliberately narrow and targeted
+     * (never a blind global punctuation strip): only the literal period immediately after the
+     * word "No" and immediately before a digit is normalized away, to a single canonical space -
+     * "No 5"/"No. 5"/"No.5" all become the identical "No 5" text before fingerprinting, while
+     * "No 19" remains completely distinct from "No 5" (the digits themselves are untouched).
+     */
+    private static final Pattern PRODUCT_NUMBER_ABBREVIATION_PATTERN =
+            Pattern.compile("(?i)(?<![\\p{L}\\p{N}])No\\.\\s*(?=\\d)");
 
     private final BrandAliasResolver brandAliasResolver;
 
@@ -311,7 +327,11 @@ public class RowAttributeNormalizer {
     private record VolumeAmount(BigDecimal value, String unit) {
     }
 
-    /** Unicode NFKC, quote/dash normalization and whitespace collapse; the visible text is preserved. */
+    /**
+     * Unicode NFKC, quote/dash normalization, the "No."/"No" product-number equivalence (see
+     * {@link #PRODUCT_NUMBER_ABBREVIATION_PATTERN}) and whitespace collapse; the visible text is
+     * otherwise preserved.
+     */
     private String cleanText(String value) {
         if (value == null) {
             return null;
@@ -321,6 +341,7 @@ public class RowAttributeNormalizer {
                 .replace('\u2018', '\'').replace('\u2019', '\'')
                 .replace('\u201C', '"').replace('\u201D', '"')
                 .replace('\u2013', '-').replace('\u2014', '-');
+        normalized = PRODUCT_NUMBER_ABBREVIATION_PATTERN.matcher(normalized).replaceAll("No ");
         return collapseWhitespace(normalized);
     }
 

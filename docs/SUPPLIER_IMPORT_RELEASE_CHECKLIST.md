@@ -1,4 +1,4 @@
-# Supplier Import Automation — Release Checklist (обновлено после пятого раунда — closing round-4 gaps in article matching and candidate search)
+# Supplier Import Automation — Release Checklist (обновлено после седьмого раунда — ADR-031, closing round-6 gaps: spelling-variant fingerprint miss, ambiguous-duplicate collapse, stale-normalization-version rows, and a real concurrent-creation race)
 
 Итог финальной ревизии (`prompts/10-final-review.md`) поверх end-to-end supplier-import pipeline
 (Prompt 01-09), обновлён после второго hardening-раунда ("Stage 1-10 automatic supplier-import
@@ -10,21 +10,28 @@ security findings closure, CI/lint, production ops — `docs/DECISIONS.md` ADR-0
 search limit, autoApply gates, CloudPayments/billing, CI branch — `docs/DECISIONS.md` ADR-022…027),
 **снова обновлён** после четвёртого раунда — тот же пользователь воспроизвёл ещё четыре гэпа,
 каждый из которых уже был явно назван как "Осознанное ограничение" в ADR-023/024/025/026 раунда 3
-(`docs/DECISIONS.md` ADR-028), и **обновлён в третий раз** после пятого раунда — тот же пользователь
+(`docs/DECISIONS.md` ADR-028), **обновлён в третий раз** после пятого раунда — тот же пользователь
 подтвердил два из четырёх раунд-4 фиксов, но воспроизвёл ещё более точными репро, что фиксы для
 article matching и candidate search (раунд 4, пп. 1-2) сами были неполными (`docs/DECISIONS.md`
-ADR-029). Это операционный чеклист для человека, включающего автоматизацию для реального
-поставщика/окружения — не описание архитектуры (см. `docs/ARCHITECTURE.md`) и не журнал решений
-(см. `docs/DECISIONS.md`).
+ADR-029), **обновлён в четвёртый раз** после шестого раунда — новая, более точная вариация того же
+класса бага в alias-идентичности плюс три архитектурных гэпа (search-completeness diagnostics,
+apply-time duplicate guard, per-batch кэш) (`docs/DECISIONS.md` ADR-030), и **обновлён в пятый раз**
+после седьмого раунда — четыре ещё более точные вариации того же класса бага (spelling-variant
+fingerprint miss, ambiguous-duplicate collapse в "safe to create", stale-normalization-version
+строки — теперь также для уже-`MATCHED` строк, реальная гонка параллельного создания товара) плюс
+транзакционный баг в фоновом backfill job и Jackson-регрессия, найденные при реализации фикса, не
+пользователем (`docs/DECISIONS.md` ADR-031). Это операционный чеклист для человека, включающего
+автоматизацию для реального поставщика/окружения — не описание архитектуры (см.
+`docs/ARCHITECTURE.md`) и не журнал решений (см. `docs/DECISIONS.md`).
 
 ## 1. Build/test gate (обязательно перед релизом)
 
 Все команды выполняются из корня репозитория.
 
-| Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-10) |
+| Проверка | Команда | Ожидаемый результат (на момент этого прогона, 2026-09-11, раунд 7) |
 | --- | --- | --- |
 | Backend компиляция | `./mvnw -q -o compile` | без ошибок |
-| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o test` | `Tests run: 347, Failures: 0, Errors: 1` (1 error = `FlywayPostgresSchemaTest`, требует локальный Docker — pre-existing environment limitation, не регрессия; на CI runner'е с Docker ожидается `Errors: 0`) |
+| Backend unit+`@DataJpaTest`+Testcontainers suite | `./mvnw -o clean verify` | `Tests run: 374, Failures: 0, Errors: 2` (2 ошибки = `FlywayPostgresSchemaTest` + новый `ProductCreationConcurrencyPostgresTest`, оба требуют локальный Docker — environment limitation, не регрессия; на CI runner'е с Docker ожидается `Errors: 0`, и именно там `ProductCreationConcurrencyPostgresTest` впервые реально подтвердит ADR-031 Section 4 cross-instance lock, а не только code review) |
 | Backend package | `./mvnw -o package -DskipTests` | success |
 | Frontend lint | `npm run lint` (в `admin-panel/`) | `0 errors` (несколько pre-existing warnings, не блокирующие) |
 | Frontend build | `npm run build` (в `admin-panel/`) | success (bundle warning про chunk size — известный, не блокирующий) |
@@ -223,6 +230,120 @@ Prompt 09/ADR-009) запускаются в составе обычного bac
 §1 подтверждает отсутствие регрессий в остальном пайплайне после этих изменений (frontend не
 менялся в этом раунде).
 
+## 2e. Раунд 6 (2026-09-11) — раунд-5 фикс сам был alias-слеп, плюс три архитектурных гэпа
+
+Четвёртая ревизия раунда 5 нашла более точную вариацию того же класса бага (fingerprint identity
+игнорировал настроенные alias'ы бренда) плюс три смежных архитектурных гэпа: не было диагностики,
+отличающей "товар реально новый" от "поиск идентичности вообще не смог выполниться" перед
+авто-созданием `NEW_PRODUCT`; не было apply-time повторной проверки против возможно изменившегося
+каталога перед фактическим созданием товара; полный per-row (не per-batch) реload бренда из БД.
+Полные детали — `docs/DECISIONS.md` ADR-030; `docs/STATE.md` → «Sixth round» для таблицы root
+cause/fix. Кратко:
+
+1. **Alias-написанная строка (`"Channel No 5"`/`"Шанель No 5"`) всё ещё не находила существующий,
+   канонически иначе написанный товар (`"Chanel No 5"`), даже с настроенным алиасом магазина, после
+   300+ товаров бренда** — fingerprint строки использовал raw-текст бренда, не alias-каноничную
+   идентичность. **Исправлено (ADR-030):** `BrandAliasResolver#canonicalKey` + вычищение
+   alias-написаний бренда из имени перед вычислением `line`; fingerprint версионирован
+   (`NORMALIZATION_VERSION` 1→2) с колонкой `SupplierProductLink.normalizationVersion` (`V30`) +
+   фоновый backfill service.
+2. **Ноль fuzzy-кандидатов мог означать и "товар реально новый", и "сам поиск идентичности не
+   смог выполниться" (нет бренда/fingerprint) — оба варианта одинаково авто-создавали
+   `NEW_PRODUCT`**. **Исправлено (ADR-030):** новый `SearchCompleteness` record, прошитый через
+   resolver → outcome → `ImportRow.candidateSearchDiagnostics` (`V31`, nullable) →
+   `ImportBatchMatchingService`, который теперь требует `requiredStagesCompleted == true` (никогда
+   не предполагается для legacy/отсутствующих строк) перед авто-подтверждением `NEW_PRODUCT`.
+3. **Решение `NEW_PRODUCT` (принятое на этапе MATCHING) всё ещё могло создать дубликат `Product`,
+   если идентичный товар уже существовал к моменту APPLY** (дубликат строки в том же файле, другой
+   batch применился первым, или ручное редактирование между этапами). **Исправлено (ADR-030):** новый
+   `reverifyStillNew` повторно выполняет неограниченную brand-scoped fingerprint-проверку против
+   текущего состояния транзакции непосредственно перед созданием; подтверждённое совпадение
+   переиспользуется (никогда не merge/delete), неоднозначный результат всё ещё создавал новый товар
+   вместо угадывания — **этот конкретный остаточный гэп сам стал Section 1 сценарием B раунда 7, см.
+   §2f ниже**.
+4. **Бренд с 300+ товарами в одном файле импорта пере-запрашивался и пере-нормализовался из БД на
+   КАЖДОЙ строке этого бренда внутри batch**. **Исправлено (ADR-030):** новый per-shop, per-brand
+   `ConcurrentHashMap` кэш в `DeterministicMatchResolver`, сбрасываемый существующим вызовом
+   `startNewBatch`.
+
+Покрыто новым/обновлённым regression-тестом, точно воспроизводящим каждый репорт. Build/test gate
+§1 (на момент раунда 6): `./mvnw -o clean verify` — 360 тестов, 0 ошибок, 1 error
+(`FlywayPostgresSchemaTest`, Docker-only, environment limitation). Frontend не менялся в этом
+раунде. **Эта секция добавлена в чеклист только сейчас, в раунде 7** — раунд 6 не обновил этот файл
+при своём завершении; см. `docs/STATE.md` за фактической хронологией.
+
+## 2f. Раунд 7 (2026-09-11) — раунд-6 фикс сам оказался неполным в четырёх точных сценариях, плюс
+транзакционный баг фонового job'а и Jackson-регрессия
+
+Пятая ревизия раунда 6 воспроизвела четыре оставшихся сценария того же класса бага (границы
+"safe to create" vs "поиск не смог сказать однозначно") плюс два бага, найденных при реализации
+фикса, не пользователем: транзакционный self-invocation баг в фоновом backfill job'е раунда 6, и
+Jackson-регрессия сериализации `SearchCompleteness`, которую пришлось исправить ПЕРВОЙ до начала
+остальной работы этого раунда (9 упавших тестов + 1 ошибка на старте раунда). Полные детали —
+`docs/DECISIONS.md` ADR-031; `docs/STATE.md` → «Seventh round» для полной таблицы root cause/fix.
+Кратко:
+
+1. **`"Chanel No. 5 100 ml"` (написание поставщика, с точкой после "No") всё ещё не находил
+   существующий `"Chanel No 5 100 ml"` (без точки) после 300+ товаров бренда** — не было никакой
+   нормализации написания `"No"`/`"No."`. **Исправлено (ADR-031):** узко-целевой regex-паттерн,
+   привязанный к буквам `"No"` (никогда не трогает настоящую десятичную точку типа `"1.5 oz"`);
+   `NORMALIZATION_VERSION` 2→3.
+2. **Два уже существующих, структурно идентичных товара (уже неоднозначность) всё ещё могли быть
+   молча приняты за "нет совпадения, безопасно создать" — создавая ТРЕТИЙ дубликат товара** — и
+   на этапе MATCHING, и на этапе APPLY проверка возвращала простой `Optional`/boolean, где `size()
+   != 1` (0 или >1) схлопывалось в одно и то же значение. **Исправлено (ADR-031):**
+   `DeterministicMatchResolver` теперь возвращает явный результат `NONE`/`UNIQUE`/`AMBIGUOUS`
+   (никогда `Optional`); `SearchCompleteness` разделён на ортогональные enum'ы
+   `IdentityOutcome`/`SearchState`; apply-time проверка в `ImportBatchApplyWriter` возвращает
+   sealed-тип `ProductCreationCheck` (`ExistingMatch`/`SafeToCreate`/`Ambiguous`/`Unsafe`) —
+   неоднозначный/небезопасный результат всегда прерывает batch для ручного review, никогда не
+   проваливается в "создать всё равно".
+3. **Строка со `normalizedData`, вычисленной СТАРОЙ версией нормализации, доверялась как есть на
+   этапе APPLY — как для `NEW_PRODUCT`, так и (раньше вообще без проверки) для уже-`MATCHED`
+   строк**. **Исправлено (ADR-031):** `refreshIfStale` (пересчитывает свежо из сырых данных строки
+   перед решением о создании `NEW_PRODUCT`) и новый `verifyMatchedProductStillAgrees` (тот же
+   пересчёт и повторная проверка — теперь применяется и к уже-`MATCHED` строкам; настоящее
+   расхождение прерывает batch вместо слепого доверия старому решению).
+4. **Два параллельных apply-транзакции (разные batch/поставщики, возможно разные инстансы) могли
+   оба выполнить re-`SELECT` "товара пока нет" до того, как коммитнется хотя бы один `INSERT`** —
+   явно названный открытым гэпом в ADR-030 §3. **Исправлено (ADR-031):** новый интерфейс
+   `ProductCreationLock`, захватываемый один раз в начале `ImportBatchApplyWriter#applyBatch` и
+   удерживаемый на всю apply-транзакцию; `PostgresAdvisoryProductCreationLock`
+   (`pg_advisory_xact_lock`, cross-instance, без миграции схемы) автоматически выбирается, когда
+   реальный datasource — PostgreSQL, иначе `LocalProductCreationLock` (JVM-local, только для одного
+   инстанса).
+5. **(Найдено, не репортовано пользователем) Фоновый пересчёт fingerprint
+   (`SupplierLinkFingerprintMigrationService#backfill()`) никогда реально не открывал транзакцию в
+   production** — self-invocation вызов (`this.recomputeOne(...)`) обходил Spring
+   `@Transactional`-proxy целиком; собственная транзакция `@DataJpaTest` молча маскировала это в
+   тестах. **Исправлено (ADR-031):** `recomputeOne` вынесен в отдельный bean
+   `SupplierLinkFingerprintRecomputer`, вызываемый как настоящий cross-bean вызов через реальный
+   proxy.
+6. **(Найдено, не репортовано пользователем) Блокирующая регрессия на старте раунда: 9 упавших
+   тестов + 1 ошибка** — Jackson сериализовал производные instance-методы `SearchCompleteness`
+   (`isAmbiguous()` и т.д.) как дополнительные bean-property JSON-поля, которые собственный
+   record-канонический десериализатор затем отвергал как нераспознанные. **Исправлено (ADR-031):**
+   каждый метод, не являющийся record-компонентом, теперь помечен `@JsonIgnore`.
+
+Также закрыто при воспроизведении сценария 1 в масштабе: brand-scoped запросы
+`SimpleProductCandidateFetcher` всё ещё индивидуально ограничивались `Pageable`/`limit` ДО
+cross-query merge/rank шага (дефект "преждевременное ограничение перед ранжированием", смежный с,
+но отличный от, фикса ADR-029) — теперь полностью безлимитны per-query, с единственной финальной
+обрезкой после ранжирования по полному объединённому пулу.
+
+Также добавлено, закрывая гэп верификации из плана этого раунда (не сам баг):
+`SupplierImportGreenMailEndToEndTest` — полный pipeline-тест с реальным embedded GreenMail
+IMAP-сервером, PRODUCTION `ImapMailboxClient` (никогда `FakeMailboxClient`) и настоящим XLSX
+вложением, от реального IMAP fetch до `APPLIED` с корректной комиссионной ценой.
+
+Покрыто новым/обновлённым regression-тестом для каждого сценария (см. `docs/DECISIONS.md` ADR-031
+"Тесты" за полным списком). Build/test gate §1 подтверждает отсутствие регрессий в остальном
+пайплайне после этих изменений (frontend не менялся в этом раунде). **Важное явное ограничение**:
+сценарий 4 (`ProductCreationConcurrencyPostgresTest`) не мог быть выполнен в этой sandbox-среде
+(нет локального Docker daemon) — реализация lock'а и её тест написаны и прошли code review, но
+кросс-инстанс поведение подтверждено ТОЛЬКО ревью кода в этой сессии, НЕ реальным запуском против
+PostgreSQL; см. §6 ниже и `docs/DECISIONS.md` ADR-031 "Осознанные ограничения" п.1.
+
 ## 3. Automation rate — как измерить перед приёмкой
 
 `docs/ARCHITECTURE.md` §15 называет **automation rate** главным продуктовым показателем: доля
@@ -308,16 +429,76 @@ failures/blockers», thresholds ADR-004/005/006) — перед включени
    §14.8) — один выборочный ручной прогон перед тем, как доверять этому по умолчанию для конкретного
    магазина.
 
-## 6. Известные ограничения (обновлено после раунда 5 — closing round-4 gaps in article matching and candidate search)
+## 6. Известные ограничения (обновлено после раунда 7 — ADR-031, closing round-6 gaps: spelling-variant fingerprint miss, ambiguous-duplicate collapse, stale-normalization-version rows, concurrent-creation race)
 
 Не переоткрывать/не пере-исследовать без нового измеренного повода — уже задокументированы, ссылки
-для контекста. **Оговорка после раундов 3, 4 и 5**: несколько пунктов ниже, помеченных как
-"Resolved" предыдущим раундом, оказались резолвены не полностью — см. §2b/§2c/§2d и
-`docs/DECISIONS.md` ADR-022…029 для того, что именно было упущено и как исправлено сейчас. Для
+для контекста. **Оговорка после раундов 3, 4, 5, 6 и 7**: несколько пунктов ниже, помеченных как
+"Resolved" предыдущим раундом, оказались резолвены не полностью — см. §2b/§2c/§2d/§2e/§2f и
+`docs/DECISIONS.md` ADR-022…031 для того, что именно было упущено и как исправлено сейчас. Для
 article matching и candidate search это уже ТРЕТЬЯ подряд итерация "Resolved" → воспроизведён новый
 гэп в той же области при более точной проверке (ADR-023 → ADR-028 → ADR-029 для article matching;
-ADR-024 → ADR-028 → ADR-029 для candidate search). Формулировка "Resolved" в этом файле означает
-"нет известной открытой проблемы на момент этого ADR", а не гарантию отсутствия багов.
+ADR-024 → ADR-028 → ADR-029 для candidate search); для apply-time product-creation safety это уже
+ВТОРАЯ подряд итерация (ADR-030 → ADR-031: "no re-verification at all" → "re-verification collapses
+ambiguous into safe-to-create, stale-version rows untrusted, no cross-instance lock"). Формулировка
+"Resolved" в этом файле означает "нет известной открытой проблемы на момент этого ADR", а не
+гарантию отсутствия багов.
+
+**Закрыто раундом 7** (2026-09-11, не открывать заново без нового измеренного повода; но см. п.1
+ниже — Scenario D's cross-instance lock is code-reviewed, NOT yet proven against real PostgreSQL in
+this sandbox):
+
+- ~~Написание с точкой после "No" (`"Chanel No. 5"`) не находило существующий товар без точки
+  (`"Chanel No 5"`) после 300+ товаров бренда~~ — **Resolved (ADR-031):** узко-целевая
+  `PRODUCT_NUMBER_ABBREVIATION_PATTERN`, `NORMALIZATION_VERSION` 2→3.
+- ~~Два существующих структурно идентичных товара (уже неоднозначность) могли быть приняты за
+  "нет совпадения, безопасно создать" — производя ТРЕТИЙ дубликат~~ — **Resolved (ADR-031):**
+  явный `NONE`/`UNIQUE`/`AMBIGUOUS` результат (никогда `Optional`) и на matching-, и на apply-time;
+  `ProductCreationCheck` sealed-тип заменяет старый `Optional<Product>`.
+- ~~Строка со `normalizedData` старой версии доверялась как есть на APPLY — для `NEW_PRODUCT` и
+  (вообще без проверки) для уже-`MATCHED` строк~~ — **Resolved (ADR-031):** `refreshIfStale` +
+  новый `verifyMatchedProductStillAgrees`, оба пересчитывают свежо из сырых данных и прерывают
+  batch при настоящем расхождении.
+- ~~Два параллельных apply-транзакции могли оба увидеть "товара нет" до коммита любого из
+  `INSERT`~~ — **"Resolved" (ADR-031) по коду и review, НЕ подтверждено реальным запуском** (см.
+  п.1 ниже): новый `ProductCreationLock`
+  (`PostgresAdvisoryProductCreationLock`/`LocalProductCreationLock`), захватываемый на весь apply
+  batch.
+- ~~Фоновый backfill job (`SupplierLinkFingerprintMigrationService`) никогда реально не открывал
+  транзакцию в production (self-invocation баг)~~ — **Resolved (ADR-031):** `recomputeOne` вынесен
+  в отдельный bean `SupplierLinkFingerprintRecomputer`, вызываемый через настоящий Spring proxy.
+
+1. **`ProductCreationConcurrencyPostgresTest` (доказательство фикса гонки создания товара, ADR-031
+   Section 4) не могло быть выполнено в этой sandbox-среде** — тот же Docker-daemon limitation, что
+   у `FlywayPostgresSchemaTest`. Реализация lock'а и тест написаны и прошли code review (реальная
+   двухпотоковая barrier/latch координация, реально задействован
+   `PostgresAdvisoryProductCreationLock`, не JVM-local fallback), но реальное cross-instance
+   поведение подтверждено ТОЛЬКО ревью кода в этой сессии, не настоящим запуском против PostgreSQL.
+   **Обязательно прогнать против реального Docker/Postgres окружения (например, CI) до того, как
+   этот фикс будет считаться доказанным, а не просто "должен работать".**
+2. **Advisory lock scoped per-shop, не per-brand/per-product** — крупный магазин, импортирующий из
+   нескольких поставщиков одновременно, теперь сериализует ВСЕ apply-фазы этих batch'ей друг
+   относительно друга (никогда не выполняет их create-or-reuse критические секции параллельно),
+   даже если они касаются полностью разных брендов/товаров. Это разумный trade-off корректности
+   против throughput; если apply-фаза когда-либо станет измеренным bottleneck'ом для одного
+   крупного магазина, более тонкая (per-brand) блокировка потребует отдельного аккуратного дизайна —
+   не реализовано здесь, поскольку per-shop — минимальная гранулярность, доказуемо корректная
+   против Scenario D.
+
+**Закрыто раундом 6** (2026-09-11, не открывать заново без нового измеренного повода; §2e добавлена
+в этот чеклист только сейчас, в раунде 7):
+
+- ~~Alias-написанная строка (`"Channel No 5"`/`"Шанель No 5"`) не находила канонически иначе
+  написанный товар (`"Chanel No 5"`), даже с настроенным алиасом, после 300+ товаров бренда~~ —
+  **Resolved (ADR-030):** `BrandAliasResolver#canonicalKey` + вычищение alias-написаний из имени;
+  `NORMALIZATION_VERSION` 1→2.
+- ~~Ноль fuzzy-кандидатов означал и "товар новый", и "поиск не смог выполниться" одинаково~~ —
+  **Resolved (ADR-030), дополнено ADR-031 (см. выше):** `SearchCompleteness` diagnostic threaded
+  end-to-end, требуется перед авто-`NEW_PRODUCT`.
+- ~~`NEW_PRODUCT` решение не перепроверялось на APPLY против изменившегося каталога~~ —
+  **"Resolved" (ADR-030), оказалось неполным (ADR-031, см. выше)** — исходный `reverifyStillNew`
+  использовал `Optional`, схлопывающий ambiguous в "safe to create"; теперь `ProductCreationCheck`.
+- ~~Полный per-row reload бренда из БД на каждой строке batch~~ — **Resolved (ADR-030):**
+  per-shop, per-brand кэш в `DeterministicMatchResolver`.
 
 **Закрыто раундом 5** (2026-09-11, не открывать заново без нового измеренного повода):
 
@@ -431,6 +612,17 @@ ADR-024 → ADR-028 → ADR-029 для candidate search). Формулировк
       ИМЕННО ЭТИХ двух областей с повышенной осторожностью и рассматривает дополнительный
       независимый review/shadow-прогон перед первым `autoApply=true` для нового поставщика с
       большим (300+) каталогом на бренд.
+- [ ] §2e — прочитан список из четырёх раунд-6 гэпов (ADR-030): alias-canonical fingerprint,
+      search-completeness diagnostic, apply-time re-verification (`reverifyStillNew`), per-batch
+      brand-кэш.
+- [ ] §2f — прочитан список из раунд-7 сценариев (ADR-031); это уже ВТОРОЙ раз подряд, когда
+      "Resolved" для apply-time product-creation safety (раунд 6) оказалось неполным — в частности,
+      §2f п.4 (concurrent-creation lock, `ProductCreationLock`) **не подтверждён реальным запуском
+      против PostgreSQL в этой sandbox-среде** (нет Docker) — ответственный оператор ОБЯЗАН
+      прогнать `ProductCreationConcurrencyPostgresTest` на среде с реальным Docker/Postgres (CI или
+      локально) и получить `Errors: 0` для этого конкретного теста до того, как первый реальный
+      поставщик с несколькими одновременно активными источниками для одного магазина будет
+      переведён на `autoApply=true`.
 - [ ] §3 — automation rate измерен и явно принят для этого поставщика.
 - [ ] §4 — shadow-mode acceptance пройден по всем пяти пунктам перед `autoApply=true`.
 - [ ] §5 — FULL snapshot чеклист пройден перед первым реальным FULL apply для этого источника.

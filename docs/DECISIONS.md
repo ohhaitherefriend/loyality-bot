@@ -2797,3 +2797,188 @@ underlying class of bug plus three related architectural gaps the earlier passes
    independently fetches/normalizes that brand once per its own batch; this is a real improvement over
    the previous per-row reload, but not a shared cache across replicas.
 
+## ADR-031 — ADR-030 follow-up: search completeness still ambiguity-blind, a real concurrent-creation
+race, and old-batch/backfill transaction bugs (2026-09-11)
+
+### Контекст
+
+A fifth review, again of the ADR-030 work, reproduced four remaining scenarios, all variations of
+the exact same underlying class of bug (an "is this genuinely new/safe" decision collapsing two
+different signals into one), plus two separate transactional bugs found while implementing the fix:
+
+1. **Scenario A — spelling variant still lost past the brand limit**: a supplier price file
+   spelling a perfume line as `"Chanel No. 5 100 ml"` (with the standard "No." abbreviation period)
+   against a catalog entry stored as `"Chanel No 5 100 ml"` (no period) still failed to match once
+   the brand had 300+ products — `RowAttributeNormalizer` had no normalization at all for the
+   "No"/"No." spelling variant, so the two computed to different `line`/fingerprint values.
+2. **Scenario B — ambiguous duplicates could still create a THIRD product**: both
+   `DeterministicMatchResolver#resolveViaSafeFingerprint` (matching-time) and
+   `ImportBatchApplyWriter`'s apply-time re-verification returned a bare `Optional`/boolean for
+   "is there a safe existing match" — `size() != 1` (0 or >1 candidates) collapsed onto the exact
+   same `Optional.empty()`/`false` value. Two pre-existing, structurally-identical products (an
+   already-ambiguous state) were silently treated as "no match, safe to create" — producing a
+   THIRD duplicate product instead of stopping for review.
+3. **Scenario C — a stale-fingerprint-version row could still create a duplicate**: a row whose
+   `normalizedData` (with its embedded fingerprint) was computed by an OLDER
+   `RowAttributeNormalizer.NORMALIZATION_VERSION` (e.g. an `AUTO_APPROVED` batch that sat unapplied
+   across a version bump) was trusted as-is at apply time, even though its fingerprint format might
+   no longer be comparable against current-format catalog fingerprints at all — for both
+   `NEW_PRODUCT` rows AND already-`MATCHED` rows (the latter was a complete gap: only `NEW_PRODUCT`
+   rows were ever re-verified before this round).
+4. **Scenario D — two concurrent batches could still double-create**: apply-time re-verification
+   (ADR-030) re-`SELECT`s inside the SAME transaction as the eventual `INSERT`, but under READ
+   COMMITTED, two DIFFERENT transactions (different suppliers, possibly different application
+   instances) can both run that re-`SELECT` and both observe "does not exist yet" before either
+   one's `INSERT` commits — explicitly named as an open, un-closed gap in ADR-030's own "Осознанные
+   ограничения" §3.
+5. **Background backfill self-invocation bug** (found while writing a genuine, real-transaction
+   test for the ADR-030 `SupplierLinkFingerprintMigrationService` backfill, not user-reported):
+   `backfill()` called `this.recomputeOne(linkId)` — a same-bean call that bypasses Spring's
+   `@Transactional` proxy entirely, so no transaction genuinely opened for the per-link recompute in
+   production; a `@DataJpaTest`'s own single-test-transaction had been silently masking this.
+
+### Решение
+
+1. **"No"/"No." spelling equivalence** — `RowAttributeNormalizer` gained a narrowly-targeted
+   `PRODUCT_NUMBER_ABBREVIATION_PATTERN` (`(?i)(?<![\p{L}\p{N}])No\.\s*(?=\d)`), applied in
+   `cleanText` before fingerprinting: normalizes the literal period immediately after the word
+   `"No"` and immediately before a digit to a single canonical space, so `"No 5"`/`"No. 5"`/
+   `"No.5"` all fingerprint identically. Deliberately anchored on the letters `"No"`, never a blind
+   punctuation strip — a genuine decimal point (always preceded by a digit, e.g. `"1.5 oz"`) can
+   never match this pattern and is never touched. `NORMALIZATION_VERSION` bumped 2 → 3.
+2. **Explicit three-way identity outcome, decoupled from search reliability** —
+   `SearchCompleteness`'s single `requiredStagesCompleted` boolean is replaced by two orthogonal
+   enums: `IdentityOutcome` (`NONE`/`UNIQUE`/`AMBIGUOUS` — what the unbounded exact-fingerprint
+   check found) and `SearchState` (`COMPLETE`/`LIMITED`/`ERRORED`/`STALE` — how reliable that
+   finding is). `DeterministicMatchResolver#resolveViaSafeFingerprint` now returns a private
+   `FingerprintCheckResult` (never an `Optional`) with an explicit `NONE`/`UNIQUE`/`AMBIGUOUS`
+   outcome; an `AMBIGUOUS` result is scored (`CandidateSearchService#scoreProducts`, new) and
+   returned as an unresolved `MatchResolution` carrying `SearchCompleteness.ambiguous(...)`.
+   `ImportBatchMatchingService#processRow` checks `completeness.isAmbiguous()` FIRST, before even
+   fetching fuzzy candidates or calling AI — an ambiguous row always routes to `NEEDS_REVIEW`
+   (`NO_MATCH`), regardless of what the AI would otherwise say about the same candidates.
+   `evaluateNewProductOrReview` now gates on `completeness.permitsAutomaticNewProduct()`
+   (`searchState == COMPLETE && identityOutcome == NONE`) instead of the old single boolean.
+3. **Apply-time re-verification result is an explicit sealed type** — new `ProductCreationCheck`
+   sealed interface (`ExistingMatch`/`SafeToCreate`/`Ambiguous`/`Unsafe`), replacing
+   `ImportBatchApplyWriter`'s old `Optional<Product> reverifyStillNew`. Every state must be handled
+   explicitly by the caller (`resolveProduct`): `ExistingMatch` reuses the product,
+   `SafeToCreate` proceeds to create it, `Ambiguous`/`Unsafe` both throw a new
+   `UnsafeProductDecisionException`, aborting (rolling back) the whole batch's apply transaction for
+   manual review rather than guessing. There is no default/implicit "otherwise safe to create"
+   fallthrough left in the code.
+4. **Cross-instance product-creation lock** — new `ProductCreationLock` interface with
+   `<T> T withLock(String shopId, Supplier<T> criticalSection)`, acquired ONCE at the very start of
+   `ImportBatchApplyWriter#applyBatch` (before any row is read/written) and held for the whole apply
+   transaction. `PostgresAdvisoryProductCreationLock` (the real, cross-instance-safe implementation)
+   uses `pg_advisory_xact_lock(hashtext(...))` keyed by `shopId` — transaction-scoped, automatically
+   released on commit/rollback, no schema migration needed. `LocalProductCreationLock` (JVM-local
+   `ReentrantLock`, explicitly documented as single-instance-only) is used on H2 (dev/test).
+   `ProductCreationLockConfig` selects between them by inspecting the live JDBC connection's actual
+   database product name — never a separate config flag, so correctness never depends on an
+   operator remembering to set one. A second, concurrent apply for the same shop (any supplier) now
+   genuinely blocks at the database until the first transaction commits or rolls back, then
+   re-observes the resulting committed state with its own fresh queries — closing the Section 1
+   scenario D / ADR-030 §3 race for real, not just "reduced".
+5. **Stale-normalization-version re-verification, for BOTH new and matched rows** —
+   `ImportBatchApplyWriter` gained `refreshIfStale` (for `NEW_PRODUCT` rows: recomputes fresh from
+   the row's persisted raw data via the CURRENT `RowAttributeNormalizer` whenever
+   `normalized.normalizationVersion() != NORMALIZATION_VERSION`, never just relabels the old value)
+   and `verifyMatchedProductStillAgrees` (new — for already-`MATCHED` rows, previously never
+   re-checked at all: recomputes fresh and re-confirms fingerprint equality + no conflicting
+   critical attributes against the matched product's current fingerprint; a genuine disagreement
+   throws `UnsafeProductDecisionException`, aborting the batch for review instead of blindly trusting
+   a decision made under an old algorithm/alias configuration).
+6. **Fixed the backfill self-invocation bug** — the per-link recompute-and-persist logic
+   (`recomputeOne`) is extracted into a new, separate `SupplierLinkFingerprintRecomputer` bean;
+   `SupplierLinkFingerprintMigrationService#backfill` now calls it as a genuine cross-bean call,
+   which goes through Spring's real `@Transactional` proxy, so each link's recompute genuinely opens
+   its own transaction in production (not just in tests, where a `@DataJpaTest`'s own transaction had
+   been silently masking the bug). One link's failure is caught in the caller, AFTER that link's own
+   transaction has already completed — isolated and logged, never aborting the rest of the batch.
+7. **Candidate-fetch premature-limiting fix** (found closing out Scenario A's repro at scale;
+   distinct from, but adjacent to, ADR-029's "unbounded fingerprint check runs first" fix) —
+   `SimpleProductCandidateFetcher`'s brand-scoped and brand+name-token queries
+   (`ProductRepository#findAllByShopIdAndBrandTokenIn`, new `#findByShopIdAndBrandTokenInAndNameToken`
+   overload) are now fully UNBOUNDED (no per-query `Pageable`/limit at all) — every qualifying
+   candidate from every query is merged and ranked by accumulated relevance BEFORE the single final
+   truncation to `candidateFetchLimit`, never truncated per-query before that ranking ever runs. Only
+   the unscoped, no-brand-specificity name-substring query keeps a generous-but-finite safety cap
+   (`MIN_NAME_TOKEN_FETCH = 2000`) to bound one row's worst-case DB round-trip cost on a very large,
+   unrelated catalog; the last-resort no-signal-at-all backfill query remains bounded by `limit`
+   (only used when nothing else matched anything, so there is no ranking to protect).
+
+### Тесты
+
+- `RowAttributeNormalizerTest#productNumberAbbreviation_noPeriod_producesIdenticalFingerprint_toNoWithoutPeriod`,
+  `#decimalPointsElsewhereInText_areNeverCorrupted_byProductNumberAbbreviationFix`,
+  `#productNumberAbbreviation_neverMergesDifferentDigits`.
+- `LargeCatalogMatchingTest#productNumberPeriodSpelling_pastBrandLimit_findsExistingProduct_noAmbiguityOrDuplicate`
+  (Scenario A, 305-filler repro, real end-to-end `MatchResolver`).
+- `ImportBatchApplyServiceTest#newProduct_apply_findsTwoExistingIdenticalProducts_abortsBatch_neverCreatesThirdDuplicate`
+  (Scenario B), `#newProduct_apply_staleNormalizationVersion_recomputesFresh_reusesExistingProduct_neverDuplicates`,
+  `#matchedRow_staleNormalizationVersion_noLongerAgreesWithFreshData_abortsForReview`,
+  `#matchedRow_staleNormalizationVersion_stillAgreesWithFreshData_appliesNormally` (Scenario C, both
+  `NEW_PRODUCT` and already-`MATCHED` rows).
+- `ProductCreationConcurrencyPostgresTest` (new, Scenario D): real `PostgreSQLContainer`
+  (`postgres:15-alpine`) + two `CountDownLatch`-coordinated threads calling
+  `applyBatch` on two different batches for the SAME shop simultaneously, with
+  `PostgresAdvisoryProductCreationLock` (never `LocalProductCreationLock`) explicitly wired, so the
+  test actually exercises the cross-instance mechanism rather than trivially "passing" a
+  single-JVM-only lock. **Could not be executed in this sandbox — no local Docker daemon** (see
+  "Осознанные ограничения" below); compiles and is structurally ready to run on any environment with
+  Docker.
+- `SupplierLinkFingerprintMigrationServiceTest` (new, backfill self-invocation bug): real
+  `@DataJpaTest` Spring context wiring the real `SupplierLinkFingerprintRecomputer` bean (not a
+  mock), using `TestTransaction.flagForCommit()+end()` before calling `backfill()` specifically
+  because `@DataJpaTest`'s own transaction-per-test-method behavior would otherwise mask the exact
+  bug being fixed — 4 tests: successful recompute inside a genuine transaction, one failing link
+  isolated from the rest, a fully-migrated shop is a no-op on a second run, bounded batch size
+  leaves remainder for a later run.
+- `SupplierImportGreenMailEndToEndTest` (new — Section 7 of this round's plan): full pipeline
+  end-to-end test using a real embedded `GreenMailExtension` IMAP server, the PRODUCTION
+  `ImapMailboxClient` (never `FakeMailboxClient`), and a genuine XLSX workbook attachment — from
+  `mailboxPollingService.pollOne` (real IMAP fetch) through parsing/normalizing/matching/validation/
+  apply to `APPLIED`, asserting the correct `1000 × 1.30 = 1300.00` commission price, an active
+  `SupplierOffer`, and storefront visibility. Only the AI layout-detection/catalog-matching calls
+  remain faked (consistent with every other e2e test in this suite; DeepSeek's own contract is
+  covered separately).
+- Also fixed a real regression discovered at the START of this round, unrelated to the four
+  scenarios above: Jackson was serializing `SearchCompleteness`'s derived instance methods
+  (`isAmbiguous()`, etc.) as extra bean-property JSON fields, which its own record-canonical-
+  constructor deserializer then rejected as unrecognized — every method that is not a record
+  component is now `@JsonIgnore`-annotated.
+- Full suite (`./mvnw -o clean verify`, real run, this sandbox): **374 tests, 0 failures, 2 errors**
+  (`FlywayPostgresSchemaTest` and the new `ProductCreationConcurrencyPostgresTest` — both require a
+  local Docker daemon not available in this sandbox; pre-existing/newly-added environment
+  limitation, not a regression — see "Осознанные ограничения" below).
+
+### Осознанные ограничения
+
+1. **`ProductCreationConcurrencyPostgresTest` (Scenario D's own proof) could NOT be executed in this
+   sandbox** — same Docker-daemon unavailability as the pre-existing `FlywayPostgresSchemaTest`. The
+   lock implementation and its test are both written and reviewed, and the test is structurally
+   sound (real two-thread barrier/latch coordination, real `PostgresAdvisoryProductCreationLock`
+   explicitly wired, not the JVM-local fallback), but the actual cross-instance locking behavior has
+   only been verified by code review in this session, not by a real execution against PostgreSQL.
+   **Must be run against a real Docker/Postgres environment (e.g. CI) before this fix is trusted as
+   proven, not just "should work".**
+2. **The advisory lock is scoped per-shop, not per-brand/per-product** — a large shop importing from
+   several suppliers' batches concurrently will now serialize ALL of those batches' apply phases
+   against each other (never run their create-or-reuse critical sections in parallel), even when
+   they touch completely disjoint brands/products. This trades a small amount of throughput for
+   correctness; if apply-phase concurrency for a single large shop ever becomes a measured
+   bottleneck, a finer-grained (per-brand) lock key would need its own careful design — not attempted
+   here, since shop-scoped is the minimum granularity that is provably correct against Scenario D.
+3. **No real supplier price file or IMAP credentials were available in this sandbox** — same
+   standing limitation as ADR-030 §2; the new `SupplierImportGreenMailEndToEndTest` closes the
+   specific gap of "no test exercises the real `ImapMailboxClient` through the full pipeline to
+   `APPLIED`" with a real (if synthetic-content) IMAP protocol exchange, but a genuinely real
+   first-supplier onboarding against a live mailbox/file still has not been observed.
+4. **`refreshIfStale`/`verifyMatchedProductStillAgrees` recompute using the row's persisted
+   `rawData`** — a row with no `rawData` at all (should be unreachable; raw values are always
+   persisted at parse time) falls back to trusting the stored, possibly-stale value as-is with only
+   a warning log — this is a defensive fallback for an assumed-impossible case, not a verified-safe
+   path, and would benefit from an explicit alert/metric if it is ever actually observed in
+   production logs.
+

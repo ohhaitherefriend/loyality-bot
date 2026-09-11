@@ -199,6 +199,57 @@ class RowAttributeNormalizerTest {
         assertEquals("Coco Mademoiselle", cocoMademoiselle.line());
     }
 
+    /**
+     * ADR-031 (Section 1, scenario A / Section 2): a supplier's "No." (with period) spelling of a
+     * perfume line number must produce the IDENTICAL fingerprint as the catalog's "No" (no period)
+     * spelling - this is the exact root cause reproduced by the report ("Chanel No 5 100 ml" saved
+     * in the catalog losing an incoming "Chanel No. 5 100 ml" row as a candidate).
+     */
+    @Test
+    void productNumberAbbreviation_noPeriod_producesIdenticalFingerprint_toNoWithoutPeriod() {
+        NormalizedRowData noPeriod = normalize("Chanel No. 5 100 ml");
+        NormalizedRowData noSpace = normalize("Chanel No 5 100 ml");
+        NormalizedRowData noPeriodNoSpace = normalize("Chanel No.5 100 ml");
+
+        assertEquals(noSpace.fingerprint(), noPeriod.fingerprint(),
+                "'No.' and 'No' must fingerprint identically - the period is a spelling variant, not a decimal point");
+        assertEquals(noSpace.fingerprint(), noPeriodNoSpace.fingerprint(),
+                "'No.5' (no space after the period) must also fingerprint identically to 'No 5'");
+        // no brand was passed to `normalize()` here, so brand-phrase stripping does not apply -
+        // the line simply keeps "Chanel" as part of the free text, identically for both spellings.
+        assertEquals("Chanel No 5", noPeriod.line());
+        assertEquals("Chanel No 5", noPeriodNoSpace.line());
+    }
+
+    /**
+     * ADR-031: the "No."/"No" abbreviation pattern is anchored on the LETTERS "No" and must never
+     * touch an unrelated decimal point elsewhere in the text - "1.5" must never be corrupted into
+     * "15", and two rows differing only in a genuine decimal article/volume number must stay
+     * distinct fingerprints.
+     */
+    @Test
+    void decimalPointsElsewhereInText_areNeverCorrupted_byProductNumberAbbreviationFix() {
+        NormalizedRowData oneHalf = normalize("Aroma Oil 1.5 oz");
+        NormalizedRowData fifteen = normalize("Aroma Oil 15 oz");
+
+        assertFalse(oneHalf.fingerprint().equals(fifteen.fingerprint()),
+                "'1.5' must never be silently rewritten to '15' by the 'No.' abbreviation fix");
+        assertEquals(new BigDecimal("1.5"), oneHalf.volumeValue());
+        assertEquals(new BigDecimal("15"), fifteen.volumeValue());
+    }
+
+    /**
+     * ADR-031: "No. 5" and "No. 19" (both with the period spelling) must still remain different
+     * products - the fix only unifies the "No"/"No." SPELLING, it must never merge different
+     * product-number digits with each other.
+     */
+    @Test
+    void productNumberAbbreviation_neverMergesDifferentDigits() {
+        NormalizedRowData no5 = normalize("Chanel No. 5 100 ml");
+        NormalizedRowData no19 = normalize("Chanel No. 19 100 ml");
+        assertFalse(no5.fingerprint().equals(no19.fingerprint()), "'No. 5' and 'No. 19' must stay different products");
+    }
+
     /** Backward compatibility: a JSON blob persisted before {@code normalizationVersion} existed must still deserialize safely. */
     @Test
     void legacyJsonWithoutNormalizationVersion_deserializesWithNullVersion() throws Exception {

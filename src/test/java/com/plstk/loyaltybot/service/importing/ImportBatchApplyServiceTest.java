@@ -197,6 +197,187 @@ class ImportBatchApplyServiceTest {
         assertEquals(firstProductId, secondRow.getMatchedProduct().getId());
     }
 
+    /**
+     * ADR-031 (Section 1, scenario B / Section 3): the catalog ALREADY contains two structurally
+     * identical products (e.g. a historical duplicate-data situation) when a row that was decided
+     * {@code NEW_PRODUCT} during the earlier matching stage reaches apply. Apply-time
+     * re-verification must recognize this as {@code ProductCreationCheck.Ambiguous}, never collapse
+     * "zero matches" and "multiple matches" into the same "OK to create" outcome - the whole batch
+     * must abort (roll back, no partial storefront update) rather than silently creating a THIRD
+     * duplicate product or auto-picking either existing one.
+     */
+    @Test
+    @DirtiesContext(methodMode = DirtiesContext.MethodMode.AFTER_METHOD)
+    void newProduct_apply_findsTwoExistingIdenticalProducts_abortsBatch_neverCreatesThirdDuplicate() {
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        String sharedFingerprint = fingerprintFor("Nivea", "Nivea Cream 100 ml");
+        // Two pre-existing catalog products, structurally identical to each other and to the
+        // incoming row - a historical duplicate-data situation, exactly as the report describes.
+        Product duplicateA = productRepository.save(Product.builder()
+                .shopId(SHOP_A).brand("Nivea").name("Nivea Cream 100 ml").currency("RUB").build());
+        Product duplicateB = productRepository.save(Product.builder()
+                .shopId(SHOP_A).brand("Nivea").name("Nivea Cream 100 ml").currency("RUB").build());
+        flushClear();
+
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        addRow(batchId, normalizedWithFingerprint("SKU-NEW", "100.00", "Nivea", sharedFingerprint), null, "Nivea Cream 100 ml");
+        flushClear();
+
+        TestTransaction.flagForCommit();
+        TestTransaction.end();
+
+        importBatchApplyService.applyNewly(batchId);
+
+        TestTransaction.start();
+        assertEquals(ImportBatchStatus.FAILED, reloadBatch(batchId).getStatus(),
+                "an ambiguous apply-time re-verification must abort/fail the whole batch, never partially apply");
+        assertEquals(2, productRepository.findAll().size(),
+                "an ambiguous match at apply time must never create a third duplicate product");
+        assertTrue(supplierOfferRepository.findAll().isEmpty(),
+                "no offer must be persisted when the batch aborts on ambiguity");
+        Product reloadedA = reloadProduct(duplicateA.getId());
+        Product reloadedB = reloadProduct(duplicateB.getId());
+        assertFalse(reloadedA.getVisible(), "an ambiguous decision must never auto-select either existing product either");
+        assertFalse(reloadedB.getVisible());
+    }
+
+    /**
+     * ADR-031 (Section 1, scenario C / Section 5): a row's {@code normalizedData} was persisted by
+     * an OLDER {@code RowAttributeNormalizer} version (simulated here with an explicit stale
+     * {@code normalizationVersion} and a fingerprint format that would never equal the CURRENT
+     * algorithm's output) before reaching apply as a {@code NEW_PRODUCT} decision. Apply must never
+     * trust the stale fingerprint as-is (which would find "no match" and create a duplicate) -
+     * {@code refreshIfStale} recomputes fresh from the row's own persisted raw data using the
+     * current algorithm, correctly finding the already-existing product and reusing it.
+     */
+    @Test
+    void newProduct_apply_staleNormalizationVersion_recomputesFresh_reusesExistingProduct_neverDuplicates() {
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        Product existing = productRepository.save(Product.builder()
+                .shopId(SHOP_A).brand("Chanel").name("Chanel No 5 100 ml").currency("RUB").build());
+        flushClear();
+
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        ImportBatch batch = importBatchRepository.findById(batchId).orElseThrow();
+        // A stale, pre-upgrade normalizedData blob: old normalizationVersion + a fingerprint format
+        // that could never equal the current algorithm's output for this same product - simulating
+        // a row that sat AUTO_APPROVED across a normalization-version upgrade. rawData still has
+        // the genuine raw brand/name the row was parsed from, so refreshIfStale can recompute.
+        NormalizedRowData staleNormalized = new NormalizedRowData(
+                "Chanel", "old-line-format", null, new BigDecimal("100"), "ml", null, null, false, false,
+                "SKU-STALE", null, new BigDecimal("100.00"), null,
+                "chanel old-line-format", "chanel|old-line-format|100|ml|||false|false", 1);
+        java.util.Map<String, String> raw = java.util.Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No 5 100 ml");
+        importRowRepository.save(ImportRow.builder()
+                .shopId(SHOP_A).importBatch(batch).sourceRowNumber(1)
+                .rawData(toJson(raw)).normalizedData(toJson(staleNormalized))
+                .status(ImportRowStatus.AUTO_APPROVED).build());
+        flushClear();
+
+        importBatchApplyService.applyNewly(batchId);
+        flushClear();
+
+        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batchId).getStatus());
+        List<Product> products = productRepository.findAll();
+        assertEquals(1, products.size(),
+                "a stale-version NEW_PRODUCT row must reuse the existing product once refreshed, never duplicate it");
+        assertEquals(existing.getId(), products.get(0).getId());
+
+        ImportRow appliedRow = onlyRow(batchId);
+        assertEquals(ImportRowStatus.APPLIED, appliedRow.getStatus());
+        assertEquals(existing.getId(), appliedRow.getMatchedProduct().getId());
+    }
+
+    /**
+     * ADR-031 (Section 5): a row already matched to a specific product (EXACT/AI_MATCH, decided
+     * during the earlier matching stage) whose {@code normalizedData} is stale-version must be
+     * re-verified against fresh raw data before its stored decision is trusted at apply time - if
+     * the current algorithm/alias config no longer agrees, the whole batch aborts for review
+     * rather than silently applying an offer against what may now be the wrong product.
+     */
+    @Test
+    @DirtiesContext(methodMode = DirtiesContext.MethodMode.AFTER_METHOD)
+    void matchedRow_staleNormalizationVersion_noLongerAgreesWithFreshData_abortsForReview() {
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        // The row was matched (during an earlier matching run) to THIS product - but that product's
+        // real brand/name ("Dior Sauvage 100 ml") structurally disagrees with what fresh
+        // re-normalization of the row's own raw data ("Chanel No 5 100 ml") produces below.
+        Product wronglyMatched = productRepository.save(Product.builder()
+                .shopId(SHOP_A).brand("Dior").name("Dior Sauvage 100 ml").currency("RUB").build());
+        flushClear();
+
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        ImportBatch batch = importBatchRepository.findById(batchId).orElseThrow();
+        NormalizedRowData staleNormalized = new NormalizedRowData(
+                "Chanel", "old-line-format", null, new BigDecimal("100"), "ml", null, null, false, false,
+                "SKU-STALE-MATCHED", null, new BigDecimal("100.00"), null,
+                "chanel old-line-format", "chanel|old-line-format|100|ml|||false|false", 1);
+        java.util.Map<String, String> raw = java.util.Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No 5 100 ml");
+        ImportRow row = ImportRow.builder()
+                .shopId(SHOP_A).importBatch(batch).sourceRowNumber(1)
+                .rawData(toJson(raw)).normalizedData(toJson(staleNormalized))
+                .status(ImportRowStatus.AUTO_APPROVED).build();
+        row.setMatchedProduct(wronglyMatched);
+        importRowRepository.save(row);
+        flushClear();
+
+        TestTransaction.flagForCommit();
+        TestTransaction.end();
+
+        importBatchApplyService.applyNewly(batchId);
+
+        TestTransaction.start();
+        assertEquals(ImportBatchStatus.FAILED, reloadBatch(batchId).getStatus(),
+                "a stale-version matched decision that no longer agrees with fresh data must abort the batch");
+        assertTrue(supplierOfferRepository.findAll().isEmpty(),
+                "no offer must be persisted against a match that no longer safely agrees");
+        assertEquals(1, productRepository.findAll().size(), "no new/duplicate product must be created either");
+    }
+
+    /**
+     * ADR-031 (Section 5): the counterpart safe case - a stale-version matched row that, once
+     * re-normalized fresh from raw data, STILL genuinely agrees with the matched product, must
+     * apply normally (never spuriously rejected just because the stored version number is old).
+     */
+    @Test
+    void matchedRow_staleNormalizationVersion_stillAgreesWithFreshData_appliesNormally() {
+        SupplierSource source = saveSource(SnapshotMode.DELTA, "SCOPE", BigDecimal.ZERO, PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
+        Product correctlyMatched = productRepository.save(Product.builder()
+                .shopId(SHOP_A).brand("Chanel").name("Chanel No 5 100 ml").currency("RUB").build());
+        flushClear();
+
+        Long batchId = createBatch(source, ImportBatchStatus.AUTO_APPROVED);
+        ImportBatch batch = importBatchRepository.findById(batchId).orElseThrow();
+        NormalizedRowData staleNormalized = new NormalizedRowData(
+                "Chanel", "old-line-format", null, new BigDecimal("100"), "ml", null, null, false, false,
+                "SKU-STALE-BUT-OK", null, new BigDecimal("150.00"), null,
+                "chanel old-line-format", "chanel|old-line-format|100|ml|||false|false", 1);
+        java.util.Map<String, String> raw = java.util.Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No 5 100 ml");
+        ImportRow row = ImportRow.builder()
+                .shopId(SHOP_A).importBatch(batch).sourceRowNumber(1)
+                .rawData(toJson(raw)).normalizedData(toJson(staleNormalized))
+                .status(ImportRowStatus.AUTO_APPROVED).build();
+        row.setMatchedProduct(correctlyMatched);
+        importRowRepository.save(row);
+        flushClear();
+
+        importBatchApplyService.applyNewly(batchId);
+        flushClear();
+
+        assertEquals(ImportBatchStatus.APPLIED, reloadBatch(batchId).getStatus(),
+                "a stale-version match that still genuinely agrees with fresh data must apply normally");
+        assertEquals(1, productRepository.findAll().size());
+        ImportRow appliedRow = onlyRow(batchId);
+        assertEquals(ImportRowStatus.APPLIED, appliedRow.getStatus());
+        assertEquals(correctlyMatched.getId(), appliedRow.getMatchedProduct().getId());
+    }
+
     @Test
     void existingOfferSamePriceAndStock_isCountedUnchanged() {
         SupplierSource source = saveSource(SnapshotMode.FULL, "SCOPE", new BigDecimal("30.00"), PriceRoundingPolicy.WHOLE_UNIT_HALF_UP);
@@ -806,6 +987,11 @@ class ImportBatchApplyServiceTest {
         }
 
         @Bean
+        ProductCreationLock productCreationLock() {
+            return new LocalProductCreationLock();
+        }
+
+        @Bean
         ImportBatchApplyWriter importBatchApplyWriter(
                 ImportBatchRepository importBatchRepository,
                 ImportRowRepository importRowRepository,
@@ -818,11 +1004,13 @@ class ImportBatchApplyServiceTest {
                 ObjectMapper objectMapper,
                 RowAttributeNormalizer rowAttributeNormalizer,
                 CriticalAttributeConflictChecker criticalAttributeConflictChecker,
-                BrandAliasResolver brandAliasResolver) {
+                BrandAliasResolver brandAliasResolver,
+                ProductCreationLock productCreationLock) {
             return new ImportBatchApplyWriter(
                     importBatchRepository, importRowRepository, productRepository, supplierOfferRepository,
                     supplierProductLinkRepository, shopSettingsRepository, pricingService, catalogAvailabilityService,
-                    objectMapper, rowAttributeNormalizer, criticalAttributeConflictChecker, brandAliasResolver);
+                    objectMapper, rowAttributeNormalizer, criticalAttributeConflictChecker, brandAliasResolver,
+                    productCreationLock);
         }
 
         @Bean

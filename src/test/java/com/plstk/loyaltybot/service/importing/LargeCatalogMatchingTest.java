@@ -408,6 +408,46 @@ class LargeCatalogMatchingTest {
     }
 
     /**
+     * ADR-031 (Section 1, scenario A, reproduced verbatim): 305 "Chanel Coco {i} 50 ml" filler
+     * products plus a saved "Chanel No 5 100 ml" product, followed by an INCOMING "Chanel No. 5
+     * 100 ml" row (period after "No", brand-new supplier article and price - i.e. genuinely a
+     * different supplier's row for the SAME real-world product) must still resolve to the existing
+     * product via the unbounded safe-fingerprint stage - never lose it among candidates, never let
+     * an AI NO_MATCH (irrelevant here since this never even reaches AI) fall through to
+     * AUTO_APPROVED NEW_PRODUCT.
+     */
+    @Test
+    void productNumberPeriodSpelling_pastBrandLimit_findsExistingProduct_noAmbiguityOrDuplicate() {
+        String shopId = "shop-no-period-repro";
+        List<Product> filler = new ArrayList<>();
+        for (int i = 0; i < 305; i++) {
+            filler.add(Product.builder()
+                    .shopId(shopId).brand("Chanel").name("Chanel Coco " + i + " 50 ml").currency("RUB").build());
+        }
+        productRepository.saveAll(filler);
+        entityManager.flush();
+
+        Long targetId = productRepository.save(Product.builder()
+                .shopId(shopId).brand("Chanel").name("Chanel No 5 100 ml").currency("RUB").build()).getId();
+        entityManager.flush();
+        long productCountBeforeMatching = productRepository.count();
+
+        NormalizedRowData incomingRow = normalizer.normalize(shopId, Map.of(
+                LayoutRuleDefinition.FIELD_BRAND, "Chanel",
+                LayoutRuleDefinition.FIELD_RAW_NAME, "Chanel No. 5 100 ml",
+                LayoutRuleDefinition.FIELD_EXTERNAL_SKU, "NEW-SUPPLIER-ARTICLE-1"));
+
+        MatchResolution resolution = matchResolver.resolve(shopId, 5150L, incomingRow);
+
+        assertTrue(resolution.isResolved(),
+                "'Chanel No. 5 100 ml' (period spelling, new article+price) must resolve to the existing "
+                        + "'Chanel No 5 100 ml' product, not fall through to AUTO_APPROVED NEW_PRODUCT");
+        assertEquals(targetId, resolution.matchedProductId());
+        assertEquals(productCountBeforeMatching, productRepository.count(),
+                "resolving the period-spelling variant must never itself create a duplicate product");
+    }
+
+    /**
      * Section 6 regression table: when the catalog itself already contains MORE THAN ONE product
      * with a fully-agreeing (structurally identical) fingerprint - e.g. a historical duplicate-data
      * situation - the unbounded safe-fingerprint stage must treat this as ambiguous and refuse to

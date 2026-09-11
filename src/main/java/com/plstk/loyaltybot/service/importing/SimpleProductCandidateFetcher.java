@@ -76,6 +76,19 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
         return cache.computeIfAbsent(key, k -> search(k.shopId(), k.brandTokens(), k.significantTokens(), k.limit()));
     }
 
+    /**
+     * ADR-031 (Section 2): every query below that is scoped by a justified search condition
+     * (brand, brand+token, name-token) is now UNBOUNDED (no per-query {@code Pageable}/limit at
+     * all) - {@code limit} is applied ONLY ONCE, after every qualifying candidate from every query
+     * has already been merged and ranked. Before this fix, each individual query below was itself
+     * capped at {@code limit} rows BEFORE the cross-query merge/rank step ever ran - for a brand
+     * with more products than {@code limit}, that per-query page window could silently cut off a
+     * highly-relevant candidate (e.g. one only reachable via the name-token query) before ranking
+     * ever got a chance to prefer it over a lower-relevance, but earlier-fetched, same-brand
+     * result. This is exactly the "premature limiting before ranking" the report demands be
+     * eliminated - a bounded FINAL shortlist for AI review is fine; a bounded RAW fetch feeding
+     * that ranking is not.
+     */
     private List<Product> search(String shopId, Set<String> brandTokens, List<String> significantTokens, int limit) {
         Map<Long, Product> byId = new LinkedHashMap<>();
         Map<Long, Integer> relevance = new HashMap<>();
@@ -86,13 +99,12 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
             // than `limit`, this finds the row's specific item within that brand even though the
             // brand-only query below alone could fill the whole page window before reaching it.
             for (String token : significantTokens) {
-                for (Product p : productRepository.findByShopIdAndBrandTokenInAndNameToken(
-                        shopId, brandTokens, token, PageRequest.of(0, limit))) {
+                for (Product p : productRepository.findByShopIdAndBrandTokenInAndNameToken(shopId, brandTokens, token)) {
                     byId.putIfAbsent(p.getId(), p);
                     relevance.merge(p.getId(), 3, Integer::sum);
                 }
             }
-            for (Product p : productRepository.findByShopIdAndBrandTokenIn(shopId, brandTokens, PageRequest.of(0, limit))) {
+            for (Product p : productRepository.findAllByShopIdAndBrandTokenIn(shopId, brandTokens)) {
                 byId.putIfAbsent(p.getId(), p);
                 relevance.merge(p.getId(), 1, Integer::sum);
             }
@@ -103,28 +115,25 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
         // brand-only query's page window happened to cut off.
         for (String token : significantTokens) {
             for (Product p : productRepository.findByShopIdAndNameContainingIgnoreCase(
-                    shopId, token, PageRequest.of(0, limit))) {
+                    shopId, token, PageRequest.of(0, Math.max(limit, MIN_NAME_TOKEN_FETCH)))) {
                 byId.putIfAbsent(p.getId(), p);
                 relevance.merge(p.getId(), 2, Integer::sum);
             }
         }
-        if (byId.size() < limit) {
+        if (byId.isEmpty()) {
             // Last-resort backfill: keeps behavior sane for rows with no usable brand/name signal at
             // all (e.g. a blank/garbage row) instead of returning zero candidates outright. Scored 0
-            // (lowest priority) - it never outranks a genuinely content-matched candidate.
-            int remaining = limit - byId.size();
-            for (Product p : productRepository.findByShopIdOrderByIdAsc(shopId, PageRequest.of(0, remaining + byId.size()))) {
-                if (byId.size() >= limit) {
-                    break;
-                }
+            // (lowest priority) - it never outranks a genuinely content-matched candidate. Only used
+            // when NOTHING else matched anything at all (no justified search condition to rank a
+            // fuller pool by), so bounding this one alone by `limit` is safe.
+            for (Product p : productRepository.findByShopIdOrderByIdAsc(shopId, PageRequest.of(0, limit))) {
                 byId.putIfAbsent(p.getId(), p);
             }
         }
-        // ADR-029: rank by accumulated relevance (most matched tokens first) before truncating to
-        // `limit` - a naive insertion-order truncation let a large pool of same-brand-only matches
-        // (each with a low, single-point score) fill the whole cap before a specifically
-        // token-matched candidate (inserted later, but far more relevant) ever got a chance to
-        // survive. Ties break by id for determinism.
+        // ADR-029/031: rank by accumulated relevance (most matched tokens first) over the FULL
+        // merged pool, THEN truncate to `limit` - never the reverse. Ties break by id for
+        // determinism. This final truncation (a bounded shortlist for AI review) is fine per
+        // spec; only truncating the raw per-query fetch BEFORE this ranking is not.
         return byId.values().stream()
                 .sorted(Comparator
                         .comparingInt((Product p) -> relevance.getOrDefault(p.getId(), 0))
@@ -133,6 +142,18 @@ public class SimpleProductCandidateFetcher implements ProductCandidateFetcher {
                 .limit(limit)
                 .toList();
     }
+
+    /**
+     * The name-substring query ({@code LIKE '%token%'}) has no brand/article specificity at all,
+     * so on a very large, unrelated catalog it could match far more than any reasonable {@code
+     * limit} - unlike the brand-scoped queries above (whose result size is naturally bounded by
+     * how many products share this row's own brand, a much smaller and more relevant set), this
+     * one specific query keeps a generous-but-finite safety cap to bound one row's DB round-trip
+     * cost, while still being far larger than the final AI-facing {@code limit} so ranking still
+     * sees every genuinely brand-scoped candidate (which always fits, since brand tokens are
+     * unbounded above) plus a wide name-token pool.
+     */
+    private static final int MIN_NAME_TOKEN_FETCH = 2000;
 
     /**
      * Every distinctive token in the row's cleaned search name - not just the single longest one

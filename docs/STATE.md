@@ -4,18 +4,21 @@
 
 ## Current stage
 
-- Stage: `SIX_BUG_HARDENING_ROUND_6_COMPLETE`
-- Active work: a sixth follow-up round — ADR-030, closing a more precise alias-identity variant of
-  the same matching-fix class plus three related architectural gaps (search-completeness diagnostics,
-  apply-time duplicate-creation guard, per-batch brand re-fetch cost). Round 5 (ADR-029), Round 4
-  (ADR-028), Round 3 (ADR-022…027), Round 2 (Stage 1-10, ADR-011…021) and Round 1 (Prompt 00-10,
-  ADR-001…010) sections below are left as historical record, not rewritten.
-- Last verified: `./mvnw -o clean verify` (real run, this sandbox) — 360 tests run, 0 failures, 1
-  error (`FlywayPostgresSchemaTest` — requires a local Docker daemon not available in this sandbox;
-  pre-existing environment limitation, unrelated to this round's changes — see ADR-030 "Осознанные
-  ограничения"). Frontend not touched this round — no `npm`/`vitest` re-run performed; Round 3's
-  results for those stand.
-- Updated at: `2026-09-11 15:15 +03:00`
+- Stage: `SEVEN_BUG_HARDENING_ROUND_7_COMPLETE`
+- Active work: a seventh follow-up round — ADR-031, closing four more precise variants of the same
+  underlying "genuinely new/safe vs. search couldn't tell" bug class (spelling-variant fingerprint
+  miss, ambiguous-duplicates collapsing to "safe to create", stale-normalization-version rows never
+  re-checked for already-matched rows, and a real concurrent-creation race), plus a background-job
+  self-invocation transaction bug and a genuine Jackson serialization regression found and fixed at
+  the start of this round. Round 6 (ADR-030), Round 5 (ADR-029), Round 4 (ADR-028), Round 3
+  (ADR-022…027), Round 2 (Stage 1-10, ADR-011…021) and Round 1 (Prompt 00-10, ADR-001…010) sections
+  below are left as historical record, not rewritten.
+- Last verified: `./mvnw -o clean verify` (real run, this sandbox) — 374 tests run, 0 failures, 2
+  errors (`FlywayPostgresSchemaTest` and the new `ProductCreationConcurrencyPostgresTest` — both
+  require a local Docker daemon not available in this sandbox; pre-existing/newly-added environment
+  limitation, not a regression — see ADR-031 "Осознанные ограничения"). Frontend not touched this
+  round — no `npm`/`vitest` re-run performed; Round 3's results for those stand.
+- Updated at: `2026-09-11 18:55 +03:00`
 - Uncommitted at time of writing — see "Next action" below for what's pending before a commit.
 
 ## Stage status
@@ -149,6 +152,52 @@ this round). No frontend files changed this round. New/updated test files: `RowA
 — both simple additive `ALTER TABLE ... ADD COLUMN`, consistent with every prior migration in this
 series, but **only exercised via H2 in this session** — see ADR-030 "Осознанные ограничения" for the
 explicit Docker/Testcontainers-Postgres and real-supplier-file gaps this round could not close.
+
+## Seventh round: ADR-030's fixes were still incomplete in four precise scenarios, plus a
+background-job transaction bug and a Jackson regression (2026-09-11)
+
+A fifth review of the ADR-030 work reproduced four remaining scenarios of the same underlying bug
+class (search-completeness/apply-time re-verification conflating "genuinely safe" with "search
+couldn't tell") plus two bugs found while implementing the fix, not user-reported: a real
+transaction self-invocation bug in the ADR-030 background backfill job, and a Jackson serialization
+regression in `SearchCompleteness` that had to be fixed FIRST before any other work in this round
+could proceed safely (9 test failures + 1 error at the start of this round). Full detail —
+`docs/DECISIONS.md` ADR-031.
+
+| # | Scenario (as reported/found) | Root cause | Fix |
+| --- | --- | --- | --- |
+| A | `"Chanel No. 5 100 ml"` (supplier's own spelling, with the abbreviation period) still fails to match an existing `"Chanel No 5 100 ml"` catalog entry (no period) once the brand has 300+ products | `RowAttributeNormalizer` had no normalization at all for the `"No"`/`"No."` spelling variant — two different fingerprints | New narrowly-targeted `PRODUCT_NUMBER_ABBREVIATION_PATTERN`, anchored on the letters `"No"` (never touches a genuine decimal point like `"1.5 oz"`); `NORMALIZATION_VERSION` bumped 2→3 |
+| B | Two pre-existing, structurally-identical products (already ambiguous) could still be silently treated as "no match, safe to create" — producing a THIRD duplicate product | Both matching-time and apply-time re-verification returned a bare `Optional`/boolean where `size() != 1` (0 or >1) collapsed onto the identical `Optional.empty()`/`false` value | `DeterministicMatchResolver` returns an explicit `NONE`/`UNIQUE`/`AMBIGUOUS` result (never `Optional`); `SearchCompleteness` split into orthogonal `IdentityOutcome`/`SearchState` enums; `ImportBatchApplyWriter`'s apply-time check returns a sealed `ProductCreationCheck` (`ExistingMatch`/`SafeToCreate`/`Ambiguous`/`Unsafe`) — an ambiguous/unsafe result always aborts the batch for review, never falls through to "create anyway" |
+| C | A row whose `normalizedData` was computed by an OLDER `NORMALIZATION_VERSION` was trusted as-is at apply time — for `NEW_PRODUCT` rows AND, previously with NO check at all, already-`MATCHED` rows | Stale fingerprint format may not even be comparable against current-format catalog fingerprints; only `NEW_PRODUCT` rows were ever re-verified before this round | `ImportBatchApplyWriter` gained `refreshIfStale` (recomputes fresh from persisted raw data before a `NEW_PRODUCT` creation decision) and new `verifyMatchedProductStillAgrees` (same recompute-and-recheck, now also applied to already-`MATCHED` rows — a genuine disagreement aborts the batch instead of blindly trusting the old decision) |
+| D | Two concurrent apply transactions (different batches/suppliers, possibly different instances) could both re-`SELECT` "does not exist yet" before either `INSERT` commits — explicitly named as an open gap in ADR-030 §3 | Apply-time re-verification re-checks inside the SAME transaction as the eventual insert, but under READ COMMITTED that is not enough to serialize two DIFFERENT transactions against each other | New `ProductCreationLock` interface, acquired once at the start of `ImportBatchApplyWriter#applyBatch` and held for the whole apply transaction; `PostgresAdvisoryProductCreationLock` (`pg_advisory_xact_lock`, cross-instance, no migration needed) selected automatically when the live datasource is PostgreSQL, `LocalProductCreationLock` (JVM-local, single-instance-only) otherwise |
+| — (found, not reported) | `SupplierLinkFingerprintMigrationService#backfill()`'s background fingerprint recompute never genuinely opened a transaction in production | Same-bean (`this.recomputeOne(...)`) call bypasses Spring's `@Transactional` proxy entirely; a `@DataJpaTest`'s own transaction had been silently masking this | Extracted `recomputeOne` into a separate `SupplierLinkFingerprintRecomputer` bean, called as a genuine cross-bean call that goes through the real proxy |
+| — (found, not reported) | Session-start blocking regression: 9 test failures + 1 error | Jackson was serializing `SearchCompleteness`'s derived instance methods (`isAmbiguous()`, etc.) as extra bean-property JSON fields, rejected as unrecognized by the record's own canonical-constructor deserializer | Every non-record-component method on `SearchCompleteness` is now `@JsonIgnore`-annotated |
+
+Also closed while reproducing Scenario A at scale: `SimpleProductCandidateFetcher`'s brand-scoped
+queries were still individually bounded by `Pageable`/`limit` BEFORE the cross-query
+merge/rank step (a "premature limiting before ranking" defect adjacent to, but distinct from,
+ADR-029's fix) — now fully unbounded per-query, with a single final truncation after ranking over
+the complete merged pool.
+
+Also added, closing a Section 7 verification gap named in this round's plan but not itself a bug:
+`SupplierImportGreenMailEndToEndTest` — a full pipeline test using a real embedded GreenMail IMAP
+server, the PRODUCTION `ImapMailboxClient` (never `FakeMailboxClient`), and a genuine XLSX
+attachment, from real IMAP fetch through to `APPLIED` with the correct commission price.
+
+Verified after Round 7: `./mvnw -o clean verify` — **374 tests run, 0 failures, 2 errors**
+(`FlywayPostgresSchemaTest`, pre-existing, and the new `ProductCreationConcurrencyPostgresTest`,
+both requiring a local Docker daemon not available in this sandbox — Scenario D's own lock
+implementation is written and code-reviewed, but its cross-instance behavior has only been verified
+by review in this session, NOT by a real execution against PostgreSQL; see ADR-031 "Осознанные
+ограничения"). No frontend files changed this round, so Round 3's frontend build/lint/test results
+stand unchanged. New/updated test files: `RowAttributeNormalizerTest`, `LargeCatalogMatchingTest`,
+`ImportBatchApplyServiceTest` (Scenarios A/B/C), `ProductCreationConcurrencyPostgresTest` (new,
+Scenario D — Docker-blocked), `SupplierLinkFingerprintMigrationServiceTest` (new, background-job
+transaction bug), `SupplierImportGreenMailEndToEndTest` (new, e2e). New production classes:
+`ProductCreationCheck`, `ProductCreationLock`/`PostgresAdvisoryProductCreationLock`/
+`LocalProductCreationLock`/`ProductCreationLockConfig`, `SupplierLinkFingerprintRecomputer`,
+`UnsafeProductDecisionException`. No new Flyway migrations this round (all changes are in-memory
+logic/JSON-diagnostic shape, not schema).
 
 ## Verified facts from repository
 
@@ -671,27 +720,33 @@ historical continuity, do not reopen without a new measured reason:**
 
 ## Next action
 
-All six rounds are complete and verified on the current working tree (uncommitted — see below):
+All seven rounds are complete and verified on the current working tree (uncommitted — see below):
 Prompt 00-10 (первый раунд, `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` §§1-5, ADR-001…010), the
 second "Stage 1-10 automatic supplier-import hardening" round (ADR-011…021), the third
-"six user-reported bugs" round (ADR-022…027), the fourth/fifth/sixth follow-up rounds closing
-progressively sharper repros of the same fix areas (ADR-028/029/030, tables above). Current
-full-suite verification: `./mvnw -o clean verify` (real run, this sandbox) — 360 tests, 0 failures,
-1 error (`FlywayPostgresSchemaTest`, Docker-only, pre-existing environment limitation — see ADR-030
-"Осознанные ограничения"); frontend not touched since Round 3, so its `npm run lint`/`npm run
-build`/`npx vitest run` results stand from that round, not re-verified this round.
-`docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` still reflects Round 3's §1/§2/§6 update — **not yet
-updated for Rounds 4-6**; treat its automation-rate/findings sections as stale until refreshed.
+"six user-reported bugs" round (ADR-022…027), the fourth/fifth/sixth/seventh follow-up rounds
+closing progressively sharper repros of the same fix areas (ADR-028/029/030/031, tables above).
+Current full-suite verification: `./mvnw -o clean verify` (real run, this sandbox) — 374 tests,
+0 failures, 2 errors (`FlywayPostgresSchemaTest`, pre-existing, and the new
+`ProductCreationConcurrencyPostgresTest`, both Docker-only, environment limitation, not a
+regression — see ADR-031 "Осознанные ограничения"); frontend not touched since Round 3, so its
+`npm run lint`/`npm run build`/`npx vitest run` results stand from that round, not re-verified this
+round. `docs/SUPPLIER_IMPORT_RELEASE_CHECKLIST.md` has been refreshed for Rounds 6-7 (§2e/§2f,
+build/test gate numbers, known-limitations list) as part of this round.
 
-**Explicitly unverified this round (per the task's own instruction not to present mocked/H2 results
-as proof of a real-Postgres/real-supplier scenario)**: (a) `V30`/`V31` against a real PostgreSQL
-instance with Flyway enabled — this sandbox has no running Docker daemon
-(`docker ps` → "Cannot connect to the Docker daemon"); (b) the real supplier file
-(`imports/price-25-06.xlsx`, referenced by the workspace rule) is not present in this workspace,
-so the IMAP→XLSX→APPLIED path was only exercised against synthetic fixtures
-(`SupplierImportEndToEndTest`) and a real-protocol-but-not-live IMAP exchange
-(`ImapMailboxClientGreenMailTest`, against an in-process GreenMail server). Both gaps must be closed
-against real infrastructure before the first live supplier's `autoApply=true` is trusted.
+**Explicitly unverified this round (per the task's own instruction not to present mocked/H2/no-Docker
+results as proof of a real-Postgres/real-concurrency/real-supplier scenario)**: (a) `V30`/`V31`
+against a real PostgreSQL instance with Flyway enabled, AND the new `ProductCreationLock`'s
+cross-instance behavior (`ProductCreationConcurrencyPostgresTest`) against real PostgreSQL — this
+sandbox has no running Docker daemon (`docker ps` → "Cannot connect to the Docker daemon"), so the
+concurrency-lock fix (ADR-031 Section 4/Scenario D) has only been verified by code review and
+compilation in this session, NOT by an actual execution proving two real concurrent transactions
+correctly serialize; (b) the real supplier file (`imports/price-25-06.xlsx`, referenced by the
+workspace rule) is not present in this workspace, so the IMAP→XLSX→APPLIED path was only exercised
+against synthetic fixtures (`SupplierImportEndToEndTest`, `SupplierImportGreenMailEndToEndTest`) and
+a real-protocol-but-not-live IMAP exchange (GreenMail, an in-process embedded server, not a live
+mailbox). Both gaps must be closed against real infrastructure — (a) on a CI runner or local machine
+with Docker, (b) with the actual first supplier's file/mailbox — before this round's fixes or the
+first live supplier's `autoApply=true` are trusted as fully proven.
 
 **Important correction to the record**: Round 2 declared several of these exact areas (FULL snapshot
 reconciliation, article matching, candidate search limit, autoApply safety gates, CloudPayments

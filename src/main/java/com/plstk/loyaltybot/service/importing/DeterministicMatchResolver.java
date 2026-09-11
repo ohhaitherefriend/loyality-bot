@@ -97,13 +97,24 @@ public class DeterministicMatchResolver {
             return articleMatch.get();
         }
 
-        // ADR-029: this exact/unbounded check runs BEFORE the bounded fuzzy candidate search below,
-        // and does not depend on it at all - a genuinely exact (fingerprint-equal) match must never
-        // be missed just because a brand has more products than the fuzzy pool's page-size cap, or
-        // because a noisy short/numeric name token diluted that pool's relevance ranking.
-        Optional<MatchResolution> fingerprintMatch = resolveViaSafeFingerprint(shopId, row);
-        if (fingerprintMatch.isPresent()) {
-            return fingerprintMatch.get();
+        // ADR-029/031: this exact/unbounded check runs BEFORE the bounded fuzzy candidate search
+        // below, and does not depend on it at all - a genuinely exact (fingerprint-equal) match
+        // must never be missed just because a brand has more products than the fuzzy pool's
+        // page-size cap, or because a noisy short/numeric name token diluted that pool's relevance
+        // ranking. It also distinguishes NONE from AMBIGUOUS (ADR-031, Section 1 scenario B) -
+        // these two are NOT the same signal and must never be collapsed into one boolean/Optional.
+        FingerprintCheckResult fingerprintCheck = resolveViaSafeFingerprint(shopId, row);
+        if (fingerprintCheck.outcome() == SearchCompleteness.IdentityOutcome.UNIQUE) {
+            return MatchResolution.resolved(fingerprintCheck.uniqueProductId(), MatchDecisionType.EXACT);
+        }
+        if (fingerprintCheck.outcome() == SearchCompleteness.IdentityOutcome.AMBIGUOUS) {
+            List<ScoredCandidate> ambiguousCandidates =
+                    candidateSearchService.scoreProducts(shopId, row, fingerprintCheck.ambiguousProducts());
+            return MatchResolution.unresolved(ambiguousCandidates, SearchCompleteness.ambiguous(
+                    "more than one catalog product shares an identical structural fingerprint "
+                            + "(brand+line+volume+concentration+shade+tester+set) - refusing to auto-pick "
+                            + "either one or to treat this row as a safe NEW_PRODUCT",
+                    RowAttributeNormalizer.NORMALIZATION_VERSION));
         }
 
         List<ScoredCandidate> scored = candidateSearchService.search(shopId, row);
@@ -111,11 +122,13 @@ public class DeterministicMatchResolver {
     }
 
     /**
-     * ADR-030: {@link #resolveViaSafeFingerprint} is UNBOUNDED (no candidate-fetch-limit at all)
-     * once it actually runs - so "did it run" (had a usable brand + fingerprint) is precisely "was
-     * the required exact-identity check complete" for this row. This does NOT depend on how many
-     * fuzzy candidates were found - zero fuzzy candidates with a completed exact-identity check is
-     * a legitimately safe signal for {@code NEW_PRODUCT}; zero fuzzy candidates WITHOUT one is not.
+     * ADR-030/031: {@link #resolveViaSafeFingerprint} is UNBOUNDED (no candidate-fetch-limit at
+     * all) once it actually runs - so "did it run" (had a usable brand + fingerprint) is precisely
+     * "was the required exact-identity check complete" for this row. This does NOT depend on how
+     * many fuzzy candidates were found - zero fuzzy candidates with a completed exact-identity
+     * check is a legitimately safe signal for {@code NEW_PRODUCT}; zero fuzzy candidates WITHOUT
+     * one is not. Only reached when the fingerprint check's own outcome was {@code NONE} (a
+     * {@code UNIQUE}/{@code AMBIGUOUS} outcome already returned from {@link #resolve} above).
      */
     private SearchCompleteness completeness(NormalizedRowData row) {
         if (row.fingerprint() == null || row.fingerprint().isBlank()) {
@@ -286,18 +299,18 @@ public class DeterministicMatchResolver {
      * candidate-fetch-limit or ranking heuristic - those remain solely a concern of the fuzzy/AI
      * suggestion path for human review, not of this deterministic auto-match decision.
      */
-    private Optional<MatchResolution> resolveViaSafeFingerprint(String shopId, NormalizedRowData row) {
+    private FingerprintCheckResult resolveViaSafeFingerprint(String shopId, NormalizedRowData row) {
         if (row.fingerprint() == null || row.fingerprint().isBlank()) {
-            return Optional.empty();
+            return FingerprintCheckResult.none();
         }
         if (row.brand() == null || row.brand().isBlank()) {
             // No brand signal to scope an otherwise-unbounded catalog query by - falls through to
             // the bounded fuzzy search instead of scanning the entire shop's catalog.
-            return Optional.empty();
+            return FingerprintCheckResult.none();
         }
         Set<String> brandTokens = brandAliasResolver.expand(shopId, row.brand());
         if (brandTokens.isEmpty()) {
-            return Optional.empty();
+            return FingerprintCheckResult.none();
         }
         List<Map.Entry<Long, NormalizedRowData>> normalizedBrandCandidates = brandFingerprintCache.computeIfAbsent(
                 new BrandCacheKey(shopId, brandTokens),
@@ -310,13 +323,41 @@ public class DeterministicMatchResolver {
                 .map(Map.Entry::getKey)
                 .distinct()
                 .toList();
-        if (fingerprintMatches.size() != 1) {
-            // 0 -> no safe fingerprint match; >1 -> ambiguous, never auto-pick one.
-            return Optional.empty();
+        if (fingerprintMatches.isEmpty()) {
+            return FingerprintCheckResult.none();
         }
-        return Optional.of(MatchResolution.resolved(fingerprintMatches.get(0), MatchDecisionType.EXACT));
+        if (fingerprintMatches.size() > 1) {
+            // ADR-031 (Section 1 scenario B): more than one catalog product structurally identical
+            // to this row - a data-quality anomaly. This is NOT the same signal as "no match" and
+            // must never be silently collapsed into it: it forbids both auto-picking either
+            // candidate AND treating the row as safe grounds for a NEW_PRODUCT.
+            List<Product> ambiguousProducts = productRepository.findByShopIdAndIdIn(shopId, fingerprintMatches);
+            return FingerprintCheckResult.ambiguous(ambiguousProducts);
+        }
+        return FingerprintCheckResult.unique(fingerprintMatches.get(0));
     }
 
     private record BrandCacheKey(String shopId, Set<String> brandTokens) {
+    }
+
+    /**
+     * ADR-031 (Section 1 scenario B): explicit three-way outcome of the unbounded safe-fingerprint
+     * check - NEVER collapsed into a single {@code Optional}, which cannot distinguish "found
+     * nothing" from "found more than one" (the exact ambiguity the report's second bug exploited).
+     */
+    private record FingerprintCheckResult(
+            SearchCompleteness.IdentityOutcome outcome, Long uniqueProductId, List<Product> ambiguousProducts) {
+
+        static FingerprintCheckResult none() {
+            return new FingerprintCheckResult(SearchCompleteness.IdentityOutcome.NONE, null, List.of());
+        }
+
+        static FingerprintCheckResult unique(Long productId) {
+            return new FingerprintCheckResult(SearchCompleteness.IdentityOutcome.UNIQUE, productId, List.of());
+        }
+
+        static FingerprintCheckResult ambiguous(List<Product> products) {
+            return new FingerprintCheckResult(SearchCompleteness.IdentityOutcome.AMBIGUOUS, null, products);
+        }
     }
 }
